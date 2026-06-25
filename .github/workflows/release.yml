@@ -1,0 +1,46 @@
+name: Release
+
+# Tag-triggered publish to GitHub Packages. Operator pushes a tag (with explicit
+# authorization) and this workflow builds, tests, then publishes any workspace
+# package whose version is not yet on the registry. GitHub Packages refuses
+# overwrites, so already-published versions are skipped automatically.
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'bridge-client-v*'
+      - 'sdk-core-v*'
+      - 'sdk-playwright-v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Unit tests
+        run: pnpm -r test
+
+      - name: Publish to GitHub Packages
+        run: pnpm -r publish --no-git-checks --access restricted
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
