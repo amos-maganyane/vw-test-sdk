@@ -1,0 +1,40 @@
+{
+  "name": "@enviro365/vw-test-sdk-core",
+  "version": "0.1.0-rc.0",
+  "description": "Framework-agnostic core for the VisualWorks test SDK: VWTestClient, WindowScope, widget handles, wait predicates, audited eval, idempotent cleanup. No Playwright dependency (L1).",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": "Enviro365 IT Solutions",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@enviro365/vw-bridge-client": "workspace:*"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amos-maganyane/vw-test-sdk.git",
+    "directory": "packages/sdk-core"
+  }
+}
