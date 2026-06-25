@@ -486,9 +486,29 @@ export class VWTestClient {
   }
 }
 
-/** Parse a Smalltalk array printString of strings — `('Foo' 'Bar')` → ['Foo','Bar']. */
+/**
+ * Parse a Smalltalk array printString — `'#()'` → [] or
+ * `'#(''Foo'' ''Bar'')'` → ['Foo', 'Bar'].
+ *
+ * The bridge's /eval applies printString to its result, so a String value gets
+ * wrapped in OUTER single quotes (e.g. the printString of an empty Array,
+ * `'#()'`, arrives here as the 5-char string with literal outer quotes). The
+ * old parser greedily matched `'#()'` as one artifact named `#()` — that was
+ * the live cleanup-verification bug.
+ */
 function parseSmalltalkStringArray(printString: string): string[] {
-  const matches = printString.match(/'((?:[^']|'')*)'/g);
+  // Strip the bridge's printString wrapping (outer single quotes), unescaping
+  // doubled inner quotes once.
+  let inner = printString;
+  if (inner.length >= 2 && inner[0] === "'" && inner[inner.length - 1] === "'") {
+    inner = inner.slice(1, -1).replace(/''/g, "'");
+  }
+
+  // Empty array literal — both forms VW emits.
+  if (inner === '#()' || inner === '()') return [];
+
+  // Extract single-quoted string elements from e.g. `#('Foo' 'Bar')`.
+  const matches = inner.match(/'((?:[^']|'')*)'/g);
   if (matches === null) return [];
   return matches.map((m) => m.slice(1, -1).replace(/''/g, "'"));
 }
