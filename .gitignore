@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+playwright-report/
+test-results/
+*.local
+*.log
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,10 @@
+packages:
+  - 'packages/*'
+  - 'examples/*'
+
+# pnpm v11.9 build-script approval (pnpm scaffolds this `allowBuilds` map itself).
+# esbuild is vitest's transform engine; it ships a prebuilt platform binary so its
+# postinstall is harmless. Setting true clears ERR_PNPM_IGNORED_BUILDS (which would
+# otherwise make `pnpm install` exit 1 and fail CI).
+allowBuilds:
+  esbuild: true

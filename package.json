@@ -1,0 +1,27 @@
+{
+  "name": "vw-test-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright-based UI test SDK for VisualWorks 9.3.1 thick-client apps via the vw-runtime-api HTTP bridge. Workspace root for @enviro365/vw-bridge-client, @enviro365/vw-test-sdk-core, and @enviro365/vw-test-sdk-playwright.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": "Enviro365 IT Solutions",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r --if-present lint",
+    "clean": "pnpm -r exec rimraf dist coverage .tsbuildinfo"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
