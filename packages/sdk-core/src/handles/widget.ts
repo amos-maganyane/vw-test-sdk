@@ -6,6 +6,7 @@
 
 import type { WidgetContext } from './context.js';
 import type { WidgetNode } from '../types.js';
+import type { VWTestClient } from '../client.js';
 
 /** Depth-first search for a widget node by its aspect (name or model). */
 export function findWidgetByAspect(node: WidgetNode, aspect: string): WidgetNode | null {
@@ -22,6 +23,11 @@ export class WidgetHandle {
     protected readonly ctx: WidgetContext,
     readonly aspect: string
   ) {}
+
+  /** The owning client — used by L2 matchers to attach action-log diagnostics. */
+  get client(): VWTestClient {
+    return this.ctx.client;
+  }
 
   /** Single click. */
   async click(): Promise<void> {
