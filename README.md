@@ -81,6 +81,29 @@ VW image. Each test creates artifacts under a unique `TestSDK_<TestName>_<worker
 prefix and removes them in `afterEach` via `vw.cleanupTestArtifacts()`. See
 [`AGENTS.md`](AGENTS.md) and architecture §15.
 
+## Environment variables
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `VW_BRIDGE_URL` | client / fixture | Bridge base URL (default `http://127.0.0.1:9876`). |
+| `VW_BRIDGE_TOKEN_FILE` | client | Path to the bridge token file (overrides the default `%LOCALAPPDATA%\Enviro365\vw-runtime-api\token`). |
+| `VW_BRIDGE_TOKEN` | client | Literal bridge token (CI). Takes precedence over the file. |
+| `VW_BRIDGE_LOG` | evidence fixture | Path to `vw-runtime-api.log`; when set, its tail is attached on failure. |
+| `CI` | client | When truthy, `exclusiveBridge` defaults to `true` (refuses to run if another client is on the bridge). |
+
+## Troubleshooting
+
+- **`BridgeCompatibilityError: requires vw-runtime-api >= 0.11.0`** — the bridge is
+  older than the 3 wait predicates + `/capabilities` this SDK needs. Cold-start the
+  0.11.0 bridge (`Start-VWRuntimeApi.ps1 -KillExisting -Mode Parcel`).
+- **`ECONNREFUSED` / health failures** — the VisualWorks image / bridge is not
+  running. Start it, then re-run `scripts/bridge-lifecycle.ps1`.
+- **`ERR_PNPM_IGNORED_BUILDS`** — a new dependency with a build script needs an entry
+  in `pnpm-workspace.yaml` `allowBuilds` (`esbuild: true`; Playwright browser download
+  is intentionally denied — this SDK drives VW, not a browser).
+- **`ExclusiveBridgeViolationError`** — another client (e.g. `vw-mcp`) is using the
+  bridge. Stop it, or set `exclusiveBridge: false` for intentional coexistence.
+
 ## Publishing
 
 Tag-triggered via GitHub Actions ([`release.yml`](.github/workflows/release.yml)).
