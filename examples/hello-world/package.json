@@ -1,0 +1,18 @@
+{
+  "name": "hello-world",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference Playwright project for the VW test SDK — reproduces the s23 benchmark stretch state (MCPBenchReviewWindow + 6-column DataSet).",
+  "scripts": {
+    "test": "playwright test",
+    "test:10x": "playwright test --workers=1 --repeat-each=10",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@enviro365/vw-test-sdk-playwright": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
