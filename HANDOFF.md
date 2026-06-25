@@ -8,12 +8,16 @@
 ## TL;DR
 
 Built the **entire `vw-test-sdk` workspace code** (Wave E1b) end-to-end:
-3 published-shape packages (L0/L1/L2) + hello-world example + CI helpers.
-**116 unit tests green**, full `pnpm -r build` + `pnpm typecheck` + `pnpm test`
-clean, and the **built `dist` artifact verified consumable** by a real-importer
-smoke. All committed locally on `main` (12 commits, **NOT pushed**).
+3 published-shape packages (L0/L1/L2) + hello-world example + CI helpers, PLUS a
+**live end-to-end Playwright benchmark passing 7/7 against the running bridge**
+(`examples/live-benchmark`). **116 unit tests green**, full `pnpm -r build` +
+`pnpm typecheck` + `pnpm test` clean, the **built `dist` artifact verified
+consumable** by a real-importer smoke, and the live benchmark green + repeatable.
+All committed locally on `main` (15 commits, **NOT pushed**).
 
-**Nothing touched the live VW image** — every SDK path is offline/bridge-stubbed.
+**Unit paths are offline/stubbed.** The live benchmark touched the real image
+transiently (created+deleted an `SDKBenchDoubler` fixture; set the "Wave A Demo -
+Doubler" demo window's input to '21'); **no persistent image changes remain**.
 
 ---
 
@@ -81,6 +85,7 @@ E1b **code** — which is exactly why this session's code work is complete.
 | `pnpm test` (whole workspace) | **116 passed / 14 files** |
 | `pnpm install --frozen-lockfile` (CI mimic) | exit 0 |
 | dist-level consumer smoke (real import of built artifact) | PASSED — guards active at runtime |
+| **live e2e Playwright benchmark** (`examples/live-benchmark`, real bridge) | **7/7 PASSED** (repeatable): liveness, window enum, widget `/type`+`/value` round-trip on a live window, server-side eval `21*2='42'`, eval-guard refusal, real PNG screenshot, action log |
 
 > LSP/tsserver is not installed (operator previously declined); `tsc` build +
 > typecheck is the authoritative type-safety gate throughout.
@@ -91,7 +96,7 @@ E1b **code** — which is exactly why this session's code work is complete.
 
 1. **Push vw-test-sdk** (one command, your call):
    `wsl --cd /mnt/c/Users/ammaganyane/tm/vw-test-sdk git push -u origin main`
-   (12 commits ahead of `origin/main` `5eded64`; first push triggers `ci.yml` on
+   (15 commits ahead of `origin/main` `5eded64`; first push triggers `ci.yml` on
    GitHub — build+typecheck+test, all expected green. Tags are NOT pushed, so no publish fires.)
 2. **Resolve P1** — the vw-mcp@1.0.4 release decision above.
 3. **Wave E1a — bridge v0.11.0** (`vw-runtime-api`): 3 wait predicates
@@ -102,9 +107,11 @@ E1b **code** — which is exactly why this session's code work is complete.
 4. **Publishes** (all gated, immutable — never done unattended): bridge-client
    `1.0.0-rc.0`→`1.0.0`, sdk-core, sdk-playwright; **vw-mcp refactor** to consume
    the extracted bridge-client (E1b.1.5/1.6) + regression (365 vitest + 27 smoke).
-5. **Live gates**: `pnpm e2e:smoke` + hello-world `--repeat-each=10` (need the
-   running 0.11.0 bridge). Confirm the s23 seeder selector + `subInstructions`
-   column/aspect names against the live image (currently faithful placeholders).
+5. **Remaining live gates** (the general live e2e is DONE — `examples/live-benchmark`
+   passes 7/7 against the 0.10.0 bridge): `pnpm e2e:smoke` + hello-world
+   `--repeat-each=10` still need the **0.11.0** bridge (they call `verifyBridge`/
+   `wait`). Confirm the s23 seeder selector + `subInstructions` column/aspect names
+   against the live image (currently faithful placeholders).
 6. **`isAnotherClientActive` probe**: confirm the exact `VWBridge.st` accessor for
    active-handler count (currently a Bug-#5-safe, fail-open best-effort probe).
 
@@ -124,13 +131,31 @@ E1b **code** — which is exactly why this session's code work is complete.
 - **`toHaveRow` matcher not built** (only the 3 in E1b.3.4); hello-world asserts
   via `dataset().waitForRow(...)` + `getRowCount()`.
 - **`exactOptionalPropertyTypes: true`** enabled per the plan; all code complies.
+- **Package `exports` gained a `default` condition** (commit `d3dcf6b`) — Playwright
+  1.61 resolves the `/reporter` subpath via non-`import` conditions, so `import`-only
+  exports threw `ERR_PACKAGE_PATH_NOT_EXPORTED`. `default` fixes it for all consumers.
+
+---
+
+## Finding — vw-mcp windowSpec codegen quirk (this image)
+
+Building a self-contained UI fixture for the benchmark surfaced a **vw-mcp** bug
+(NOT an SDK bug): `vw_create_application_model` and `vw_create_window_spec` both
+generate a `windowSpec` that fails to **open** on this image with
+`BindingNotFoundError: aspect: #undefined not found!` — even with only plain
+`InputField` components. The model logic was fine (`SDKBenchDoubler` doubled
+`21`→`42` via eval). Worked around by benchmarking an existing open window
+instead. Worth a vw-mcp issue: the generated FullSpec/widget specs appear to
+emit a `#undefined` aspect binding. (Fixture created then deleted; image clean.)
 
 ---
 
 ## Environment / state
 
-- **Bridge UNCHANGED** (never touched): `vwnt.exe` PID **5488**, version `0.10.0`,
-  FileIn mode, token tail `…-884830`. (SDK work is entirely offline/stubbed.)
+- **Bridge**: `vwnt.exe` PID **5488**, version `0.10.0`, FileIn mode, token tail
+  `…-884830`. The live benchmark drove it (transient `SDKBenchDoubler` fixture
+  created+deleted; "Wave A Demo - Doubler" input left at '21'); **no persistent
+  class/window changes remain**. Unit work is offline/stubbed.
 - **Toolchain**: node v26.3.0 + pnpm **11.9.0** (installed globally this session)
   on Windows; **git via WSL** (workspace convention). `@types/node`/tsc target ES2022.
 - **Git identity** set locally on this repo: `amos-maganyane <amos.maganyane@enviro365.co.za>`
