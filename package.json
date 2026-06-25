@@ -14,13 +14,16 @@
     "build": "pnpm -r build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r typecheck && tsc -p scripts/tsconfig.json",
     "lint": "pnpm -r --if-present lint",
+    "e2e:smoke": "tsx scripts/e2e-smoke.ts",
     "clean": "pnpm -r exec rimraf dist coverage .tsbuildinfo"
   },
   "devDependencies": {
+    "@enviro365/vw-test-sdk-core": "workspace:*",
     "@types/node": "^20.14.0",
     "rimraf": "^5.0.5",
+    "tsx": "^4.19.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
   }
