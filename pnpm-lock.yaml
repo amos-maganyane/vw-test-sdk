@@ -27,6 +27,16 @@ importers:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.43)
 
+  ../test-vs-playwright:
+    dependencies:
+      '@enviro365/vw-test-sdk-playwright':
+        specifier: workspace:*
+        version: link:../vw-test-sdk/packages/playwright
+    devDependencies:
+      '@playwright/test':
+        specifier: ^1.49.0
+        version: 1.61.1
+
   examples/hello-world:
     dependencies:
       '@enviro365/vw-test-sdk-playwright':

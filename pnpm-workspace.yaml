@@ -1,6 +1,11 @@
 packages:
   - 'packages/*'
   - 'examples/*'
+  # External test project — lives in its OWN git repo
+  # (https://github.com/amos-maganyane/test-vs-playwright), sibling of this
+  # workspace. The relative-up path keeps `workspace:*` resolution working
+  # until the SDK packages are published; remove this glob once they ship.
+  - '../test-vs-playwright'
 
 # pnpm v11.9 build-script approval (pnpm scaffolds this `allowBuilds` map itself).
 # esbuild is vitest's transform engine; it ships a prebuilt platform binary so its
