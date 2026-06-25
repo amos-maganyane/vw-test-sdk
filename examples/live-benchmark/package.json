@@ -1,0 +1,17 @@
+{
+  "name": "live-benchmark",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Real end-to-end Playwright benchmark for the VW test SDK against a LIVE bridge. Avoids the 0.11.0-gated wait()/capabilities surface so it runs on bridge >= 0.10.0.",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@enviro365/vw-test-sdk-playwright": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
