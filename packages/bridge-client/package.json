@@ -1,0 +1,37 @@
+{
+  "name": "@enviro365/vw-bridge-client",
+  "version": "1.0.0-rc.0",
+  "description": "HTTP client for the vw-runtime-api VisualWorks bridge: token rotation, 401-retry, typed response shapes. Framework-agnostic (L0).",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": "Enviro365 IT Solutions",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "clean": "rimraf dist"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amos-maganyane/vw-test-sdk.git",
+    "directory": "packages/bridge-client"
+  }
+}
