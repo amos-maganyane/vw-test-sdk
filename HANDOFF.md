@@ -10,14 +10,20 @@
 Built the **entire `vw-test-sdk` workspace code** (Wave E1b) end-to-end:
 3 published-shape packages (L0/L1/L2) + hello-world example + CI helpers, PLUS a
 **live end-to-end Playwright benchmark passing 7/7 against the running bridge**
-(`examples/live-benchmark`). **116 unit tests green**, full `pnpm -r build` +
+(`examples/live-benchmark`), PLUS a **dedicated test repo**
+[`test-vs-playwright`](https://github.com/amos-maganyane/test-vs-playwright)
+sitting beside this one in `tm/`. **116 unit tests green**, full `pnpm -r build` +
 `pnpm typecheck` + `pnpm test` clean, the **built `dist` artifact verified
-consumable** by a real-importer smoke, and the live benchmark green + repeatable.
-All committed locally on `main` (15 commits, **NOT pushed**).
+consumable** by a real-importer smoke, the live benchmark green + repeatable,
+and the test repo's starter spec runs clean against the live bridge. All
+committed locally on `main` (17 commits, **NOT pushed**); test-vs-playwright
+has 1 commit ahead of `origin/main` (also NOT pushed).
 
-**Unit paths are offline/stubbed.** The live benchmark touched the real image
-transiently (created+deleted an `SDKBenchDoubler` fixture; set the "Wave A Demo -
-Doubler" demo window's input to '21'); **no persistent image changes remain**.
+**Unit paths are offline/stubbed.** Live runs touched the real image
+transiently (the live benchmark created+deleted an `SDKBenchDoubler` fixture
+and set the "Wave A Demo - Doubler" demo window's input to '21'; the
+test-vs-playwright starter drove the same demo window); **no persistent image
+changes remain**.
 
 ---
 
@@ -58,6 +64,9 @@ E1b **code** — which is exactly why this session's code work is complete.
 | 43b9a0c | feat(example): hello-world reproducing s23 benchmark stretch state | E1b.4.1-4.3 |
 | eb21439 | feat(scripts): e2e-smoke + bridge-lifecycle CI helpers | E1b.5.1-5.2 |
 | a206ae3 | docs(readme): env vars + troubleshooting | E1b.6.2 |
+| 6fc88e8 | docs(handoff): record live benchmark 7/7 + exports fix + windowSpec finding | (handoff) |
+| 6a4730f | chore(workspace): point at ../test-vs-playwright (tests now live in their own repo) | (Phase E1b — tests repo) |
+| 3ec1331 | fix(sdk-core): correctly parse the bridge's printString-wrapped array result | (cleanup bugfix) |
 
 ### Packages (all build to `dist/` with `.d.ts`)
 - **`@enviro365/vw-bridge-client`** (L0, `1.0.0-rc.0`) — verbatim extraction of
@@ -86,6 +95,7 @@ E1b **code** — which is exactly why this session's code work is complete.
 | `pnpm install --frozen-lockfile` (CI mimic) | exit 0 |
 | dist-level consumer smoke (real import of built artifact) | PASSED — guards active at runtime |
 | **live e2e Playwright benchmark** (`examples/live-benchmark`, real bridge) | **7/7 PASSED** (repeatable): liveness, window enum, widget `/type`+`/value` round-trip on a live window, server-side eval `21*2='42'`, eval-guard refusal, real PNG screenshot, action log |
+| **live test-vs-playwright** (separate repo, real bridge) | PASSED — starter spec drives "Wave A Demo - Doubler" with idempotent cleanup; cleanup-parser bugfix verified live |
 
 > LSP/tsserver is not installed (operator previously declined); `tsc` build +
 > typecheck is the authoritative type-safety gate throughout.
@@ -96,8 +106,11 @@ E1b **code** — which is exactly why this session's code work is complete.
 
 1. **Push vw-test-sdk** (one command, your call):
    `wsl --cd /mnt/c/Users/ammaganyane/tm/vw-test-sdk git push -u origin main`
-   (15 commits ahead of `origin/main` `5eded64`; first push triggers `ci.yml` on
+   (17 commits ahead of `origin/main` `5eded64`; first push triggers `ci.yml` on
    GitHub — build+typecheck+test, all expected green. Tags are NOT pushed, so no publish fires.)
+1b. **Push test-vs-playwright** (separate repo):
+    `wsl --cd /mnt/c/Users/ammaganyane/tm/test-vs-playwright git push origin main`
+    (1 commit ahead — the initial scaffold replacing the README stub.)
 2. **Resolve P1** — the vw-mcp@1.0.4 release decision above.
 3. **Wave E1a — bridge v0.11.0** (`vw-runtime-api`): 3 wait predicates
    (`aspectMatches`, `widgetEnabled`, `listHasRow`) + `GET /capabilities` +
@@ -137,6 +150,23 @@ E1b **code** — which is exactly why this session's code work is complete.
 
 ---
 
+## Finding — SDK cleanup parser bug (FIXED this session, commit `3ec1331`)
+
+The live `test-vs-playwright` run exposed a real SDK bug — surfaced as
+`IncompleteCleanupError: ... 1 artifact(s): #()`. Root cause: the bridge's
+`/eval` endpoint applies `printString` to its result, so a String value comes
+back with OUTER single quotes (an empty Array printString `#()` arrives as the
+5-char string `'#()'` with literal outer quotes). The old `parseSmalltalkStringArray`
+regex greedily matched `'#()'` as ONE artifact named `#()`, so cleanup ALWAYS
+thought a leftover artifact remained even when the image was clean.
+
+Fix: strip the outer single-quote wrapping (and unescape doubled inner quotes
+once) before checking for empty-array literals and matching real string
+elements. Unit tests' stub `evalResult` were also using an unrealistic shape
+(no outer quotes) — they passed by accident; they now mock the REAL bridge
+format (`'#()'` / `'#(''X'')'`), locking the fix against regression. 116 unit
+tests still green; live test-vs-playwright now green.
+
 ## Finding — vw-mcp windowSpec codegen quirk (this image)
 
 Building a self-contained UI fixture for the benchmark surfaced a **vw-mcp** bug
@@ -154,12 +184,20 @@ emit a `#undefined` aspect binding. (Fixture created then deleted; image clean.)
 
 - **Bridge**: `vwnt.exe` PID **5488**, version `0.10.0`, FileIn mode, token tail
   `…-884830`. The live benchmark drove it (transient `SDKBenchDoubler` fixture
-  created+deleted; "Wave A Demo - Doubler" input left at '21'); **no persistent
-  class/window changes remain**. Unit work is offline/stubbed.
+  created+deleted; "Wave A Demo - Doubler" input left at '21'); the
+  test-vs-playwright starter spec also drove that same demo window;
+  **no persistent class/window changes remain**. Unit work is offline/stubbed.
 - **Toolchain**: node v26.3.0 + pnpm **11.9.0** (installed globally this session)
   on Windows; **git via WSL** (workspace convention). `@types/node`/tsc target ES2022.
-- **Git identity** set locally on this repo: `amos-maganyane <amos.maganyane@enviro365.co.za>`
-  (mirrored from vw-mcp; repo-scoped only).
+- **Git identity** set locally on both repos (vw-test-sdk + test-vs-playwright):
+  `amos-maganyane <amos.maganyane@enviro365.co.za>` (mirrored from vw-mcp).
+- **test-vs-playwright** ([github.com/amos-maganyane/test-vs-playwright](https://github.com/amos-maganyane/test-vs-playwright)) —
+  cloned to `tm/test-vs-playwright/`; full Playwright scaffold + AGENTS.md;
+  1 commit (`16d6238`) ahead of origin's `9fe21ad` Initial-commit stub.
+- **vw-test-author agent globalized** to `~/.config/opencode/agents/` (the 4
+  `gs-*`/`vw-test-author` agents now available in every workspace); MCP servers
+  (gemstone, jira, memory, vw-mcp) + safety policy also promoted to
+  `~/.config/opencode/opencode.jsonc`. Project `tm/opencode.json` untouched.
 - **vw-mcp / vw-runtime-api / tm-context**: untouched by this session.
 
 ---
