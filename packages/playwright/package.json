@@ -1,0 +1,50 @@
+{
+  "name": "@enviro365/vw-test-sdk-playwright",
+  "version": "0.1.0-rc.0",
+  "description": "Playwright integration for the VisualWorks test SDK: test.extend fixture, failure-evidence auto-fixture, custom matchers, and reporter (L2).",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": "Enviro365 IT Solutions",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./reporter": {
+      "types": "./dist/reporter.d.ts",
+      "import": "./dist/reporter.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@enviro365/vw-test-sdk-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amos-maganyane/vw-test-sdk.git",
+    "directory": "packages/playwright"
+  }
+}

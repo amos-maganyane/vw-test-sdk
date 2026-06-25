@@ -8,3 +8,8 @@ packages:
 # otherwise make `pnpm install` exit 1 and fail CI).
 allowBuilds:
   esbuild: true
+  # Deny Playwright's browser-download postinstall: this SDK drives VisualWorks
+  # over the bridge, not a browser, so no Chromium/Firefox/WebKit binaries are
+  # needed. `false` both skips the heavy download AND clears ERR_PNPM_IGNORED_BUILDS.
+  playwright: false
+  playwright-core: false
