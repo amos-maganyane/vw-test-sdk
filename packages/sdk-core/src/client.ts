@@ -47,6 +47,11 @@ import type {
   CleanupOptions,
   CleanupReport,
   ForeignCaller,
+  MenuClickResult,
+  MenuTreeResult,
+  SelectRowResult,
+  StructuredReadResult,
+  StructuredRowsResult,
   StateSnapshot,
   WidgetNode,
   WidgetValueResult,
@@ -58,7 +63,17 @@ import { buildScreenshotSpec, type ScreenshotOptions } from './screenshot.js';
 
 const CLASS_NAME_RE = /^[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*$/;
 const SELECTOR_RE = /^[A-Za-z][A-Za-z0-9_]*:?$/;
-const NO_GBS_SENTINEL = '__VW_TEST_SDK_NO_GBS__';
+
+interface GsEvalResponse {
+  ok: boolean;
+  valueType?: 'string' | 'number' | 'boolean' | 'nil' | 'collection' | 'opaque';
+  value?: string | number | boolean | null;
+  repr?: string;
+  size?: number;
+  error?: string;
+  hint?: string;
+  description?: string;
+}
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -175,7 +190,7 @@ export class VWTestClient {
   /** Open an ApplicationModel subclass and return a scope for its window. */
   async openApplication(
     className: string,
-    opts: { specSelector?: string; windowTitle?: string } = {}
+    opts: { specSelector?: string; windowTitle?: string; classSelector?: 'open' | 'launch' } = {}
   ): Promise<WindowScope> {
     if (!CLASS_NAME_RE.test(className)) {
       throw new VWTestSDKError(`openApplication: invalid className "${className}".`);
@@ -186,10 +201,9 @@ export class VWTestClient {
     if (opts.specSelector !== undefined && !SELECTOR_RE.test(opts.specSelector)) {
       throw new VWTestSDKError(`openApplication: invalid specSelector "${opts.specSelector}".`);
     }
-    const probe =
-      opts.specSelector !== undefined
-        ? `${className} new openInterface: #${opts.specSelector}`
-        : `${className} open`;
+    const probe = opts.specSelector !== undefined
+      ? `${className} new openInterface: #${opts.specSelector}`
+      : `${className} ${opts.classSelector ?? 'open'}`;
     await this.evaluate(probe);
     this.record('open', { className, specSelector: opts.specSelector });
     return this.window(opts.windowTitle ?? className);
@@ -216,6 +230,72 @@ export class VWTestClient {
     this.record('fill', { aspect, windowTitle });
   }
 
+  /** POST /set-dataset-cell through the DataSet column-model change path. */
+  async setDatasetCell(
+    aspect: string,
+    rowIndex: number,
+    column: string,
+    value: string,
+    windowTitle?: string
+  ): Promise<void> {
+    const body: Record<string, unknown> = { aspect, rowIndex, column, value };
+    if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
+    await this.bridge.postJson('/set-dataset-cell', body);
+    this.record('setDatasetCell', { aspect, rowIndex, column, windowTitle });
+  }
+
+  /** Select the first list/DataSet row whose rendered content contains match. */
+  async selectRow(aspect: string, match: string, windowTitle?: string): Promise<SelectRowResult> {
+    const body: Record<string, unknown> = { aspect, match };
+    if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
+    const result = await this.bridge.postJson<SelectRowResult>('/select-row', body);
+    this.record('selectRow', { aspect, match, windowTitle, index: result.index });
+    return result;
+  }
+
+  /** Read the live native menu tree for a window. */
+  async menuTree(windowTitle?: string): Promise<MenuTreeResult> {
+    const suffix = windowTitle === undefined ? '' : `?windowTitle=${encodeURIComponent(windowTitle)}`;
+    return this.bridge.getJson<MenuTreeResult>(`/menu${suffix}`);
+  }
+
+  /** Dispatch a native menu leaf by its complete visible label path. */
+  async clickMenu(path: readonly string[], windowTitle?: string): Promise<MenuClickResult> {
+    const body: Record<string, unknown> = { path: [...path] };
+    if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
+    const result = await this.bridge.postJson<MenuClickResult>('/menu/click', body);
+    this.record('menuClick', { path, windowTitle, state: result.state });
+    return result;
+  }
+
+  /** Read allowlisted unary paths from a named bridge anchor. */
+  async read(
+    root: string,
+    fields: Record<string, string>,
+    windowTitle?: string
+  ): Promise<StructuredReadResult> {
+    const body: Record<string, unknown> = { root, fields };
+    if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
+    const result = await this.bridge.postJson<StructuredReadResult>('/read', body);
+    this.record('read', { root, fields: Object.keys(fields), windowTitle });
+    return result;
+  }
+
+  /** Read typed row columns from a named list on a bridge anchor. */
+  async readRows(
+    root: string,
+    list: string,
+    columns: readonly string[],
+    opts: { windowTitle?: string; maxRows?: number } = {}
+  ): Promise<StructuredRowsResult> {
+    const body: Record<string, unknown> = { root, list, columns: [...columns] };
+    if (opts.windowTitle !== undefined) body['windowTitle'] = opts.windowTitle;
+    if (opts.maxRows !== undefined) body['maxRows'] = opts.maxRows;
+    const result = await this.bridge.postJson<StructuredRowsResult>('/read/rows', body);
+    this.record('readRows', { root, list, columns, windowTitle: opts.windowTitle, returned: result.returned });
+    return result;
+  }
+
   /** GET /value → the widget's value. */
   async getWidgetValue(aspect: string, windowTitle?: string): Promise<unknown> {
     const params = new URLSearchParams({ aspect });
@@ -225,12 +305,12 @@ export class VWTestClient {
     return result.value;
   }
 
-  /** Close a window by title (best-effort via eval). */
+  /** Close every live scheduled window with the exact title. */
   async closeWindow(title: string): Promise<void> {
     const snippet =
-      `| w | w := ScheduledWindow allInstances ` +
-      `detect: [:each | each label = ${quoteSmalltalkString(title)}] ifNone: [nil]. ` +
-      `w isNil ifTrue: ['no-window'] ifFalse: [w controller close. 'closed']`;
+      `| matches | matches := ScheduledControllers scheduledControllers select: [:each | ` +
+      `each view notNil and: [each view label = ${quoteSmalltalkString(title)}]]. ` +
+      `matches do: [:each | each view close]. matches size printString`;
     await this.evaluate(snippet);
     this.record('close', { title });
   }
@@ -322,27 +402,34 @@ export class VWTestClient {
     return result.result ?? '';
   }
 
-  /** Evaluate Smalltalk in the embedded GBS session. Refuses if no session is live. */
+  /** Evaluate Smalltalk through the bridge's replicated, bounded GBS endpoint. */
   async evaluateInGBSSession(source: string): Promise<string> {
     const safety = checkEvalSafety(source);
     if (!safety.safe) {
       throw new EvalGuardError(safety.reason ?? 'evaluateInGBSSession refused by safety guard');
     }
-    const wrapped =
-      `GBSM currentSession isNil ` +
-      `ifTrue: ['${NO_GBS_SENTINEL}'] ` +
-      `ifFalse: [GBSM currentSession execute: ${quoteSmalltalkString(source)}]`;
-    const result = await this.postEvalChecked(wrapped);
-    if (!result.ok) {
-      throw new VWTestSDKError(`GBS eval failed: ${result.error ?? '(no error message)'}`);
+    let result: GsEvalResponse;
+    try {
+      result = await this.bridge.postJson<GsEvalResponse>('/gs-eval', { source });
+    } catch (error) {
+      const message = formatBridgeError(error);
+      if (message.includes('no_gbs_session')) {
+        throw new NoGBSSessionError(message);
+      }
+      throw new VWTestSDKError(`GBS eval failed: ${message}`);
     }
-    const out = result.result ?? '';
-    if (out.includes(NO_GBS_SENTINEL)) {
+    this.record('gs-eval', { length: source.length, valueType: result.valueType }, result.ok, result.error);
+    if (!result.ok && result.error === 'no_gbs_session') {
       throw new NoGBSSessionError(
-        'No live GBS session registered with GBSM — evaluateInGBSSession requires a GemStone session.'
+        result.hint ?? 'No live GBS session registered with GBSM — evaluateInGBSSession requires a GemStone session.'
       );
     }
-    return out;
+    if (!result.ok) {
+      throw new VWTestSDKError(`GBS eval failed: ${result.description ?? result.error ?? '(no error message)'}`);
+    }
+    if (result.valueType === 'nil') return 'nil';
+    if (result.value !== undefined && result.value !== null) return String(result.value);
+    return result.repr ?? '';
   }
 
   private async postEvalChecked(source: string): Promise<BridgeEvalResult> {

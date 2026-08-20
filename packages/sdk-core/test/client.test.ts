@@ -9,8 +9,6 @@ import {
 } from '../src/errors.js';
 import { makeStubBridge } from './_stub.js';
 
-const NO_GBS = '__VW_TEST_SDK_NO_GBS__';
-
 describe('VWTestClient.verifyBridge', () => {
   it('rejects a bridge below the minimum version', async () => {
     const vw = new VWTestClient({}, makeStubBridge({ version: '0.10.0' }));
@@ -75,20 +73,47 @@ describe('VWTestClient.evaluate — guards (parity with vw-mcp)', () => {
 });
 
 describe('VWTestClient.evaluateInGBSSession', () => {
-  it('wraps the source in GBSM currentSession execute:', async () => {
-    const bridge = makeStubBridge({ evalResult: () => ({ ok: true, result: '42' }) });
+  it('routes source through the bridge /gs-eval endpoint', async () => {
+    const bridge = makeStubBridge({
+      jsonResult: (path) => path === '/gs-eval'
+        ? { ok: true, valueType: 'string', value: '42' }
+        : { ok: true },
+    });
     const vw = new VWTestClient({}, bridge);
     const out = await vw.evaluateInGBSSession("Customer new rsaId: '8001015009087'");
     expect(out).toBe('42');
-    const sentSource = vi.mocked(bridge.postEval).mock.calls[0]?.[0] ?? '';
-    expect(sentSource).toContain('GBSM currentSession execute:');
-    expect(sentSource).toContain("Customer new rsaId: ''8001015009087''");
+    expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/gs-eval', {
+      source: "Customer new rsaId: '8001015009087'",
+    });
+    expect(vi.mocked(bridge.postEval)).not.toHaveBeenCalled();
   });
 
   it('throws NoGBSSessionError when no session is live', async () => {
-    const bridge = makeStubBridge({ evalResult: () => ({ ok: true, result: NO_GBS }) });
+    const bridge = makeStubBridge({
+      jsonResult: () => ({ ok: false, error: 'no_gbs_session' }),
+    });
     const vw = new VWTestClient({}, bridge);
     await expect(vw.evaluateInGBSSession('1 + 1')).rejects.toBeInstanceOf(NoGBSSessionError);
+  });
+
+  it.each([
+    ['number', 42, '42'],
+    ['boolean', true, 'true'],
+    ['nil', null, 'nil'],
+  ] as const)('maps a typed %s response to the legacy string result', async (valueType, value, expected) => {
+    const bridge = makeStubBridge({
+      jsonResult: () => ({ ok: true, valueType, value }),
+    });
+    const vw = new VWTestClient({}, bridge);
+    await expect(vw.evaluateInGBSSession('fixture expression')).resolves.toBe(expected);
+  });
+
+  it('returns diagnostic repr for an opaque result', async () => {
+    const bridge = makeStubBridge({
+      jsonResult: () => ({ ok: true, valueType: 'opaque', repr: 'a DomainObject' }),
+    });
+    const vw = new VWTestClient({}, bridge);
+    await expect(vw.evaluateInGBSSession('DomainObject new')).resolves.toBe('a DomainObject');
   });
 
   it('still applies destructive-op guards', async () => {
@@ -98,6 +123,44 @@ describe('VWTestClient.evaluateInGBSSession', () => {
 });
 
 describe('VWTestClient — widget operations', () => {
+  it('selectRow posts the typed content-match request', async () => {
+    const bridge = makeStubBridge({
+      jsonResult: () => ({ ok: true, index: 2, rowCount: 3, row: 'Test fund (A)' }),
+    });
+    const vw = new VWTestClient({}, bridge);
+    await expect(vw.selectRow('funds', 'Test fund', 'Search')).resolves.toMatchObject({ index: 2 });
+    expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/select-row', {
+      aspect: 'funds', match: 'Test fund', windowTitle: 'Search',
+    });
+  });
+
+  it('clickMenu posts the complete native menu path', async () => {
+    const bridge = makeStubBridge();
+    const vw = new VWTestClient({}, bridge);
+    await vw.clickMenu(['Bulk Adm', 'Section 42 Transfer', 'Execute'], 'MOMENTUM WEALTH');
+    expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/menu/click', {
+      path: ['Bulk Adm', 'Section 42 Transfer', 'Execute'], windowTitle: 'MOMENTUM WEALTH',
+    });
+  });
+
+  it('read posts named fields to the structured endpoint', async () => {
+    const bridge = makeStubBridge({ jsonResult: () => ({ ok: true, root: 'viewModel:X', fields: {} }) });
+    const vw = new VWTestClient({}, bridge);
+    await vw.read('viewModel:X', { status: 'status.value' }, 'X');
+    expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/read', {
+      root: 'viewModel:X', fields: { status: 'status.value' }, windowTitle: 'X',
+    });
+  });
+
+  it('readRows posts list and columns to the structured endpoint', async () => {
+    const bridge = makeStubBridge({ jsonResult: () => ({ ok: true, size: 0, returned: 0, rows: [] }) });
+    const vw = new VWTestClient({}, bridge);
+    await vw.readRows('viewModel:X', 'rows', ['code'], { windowTitle: 'X' });
+    expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/read/rows', {
+      root: 'viewModel:X', list: 'rows', columns: ['code'], windowTitle: 'X',
+    });
+  });
+
   it('clickWidget posts /click with aspect + windowTitle', async () => {
     const bridge = makeStubBridge();
     const vw = new VWTestClient({}, bridge);
@@ -133,6 +196,13 @@ describe('VWTestClient.openApplication', () => {
     const scope = await vw.openApplication('CustomerSearchView');
     expect(vi.mocked(bridge.postEval)).toHaveBeenCalledWith('CustomerSearchView open');
     expect(scope).toBeDefined();
+  });
+
+  it('supports the constrained class-side launch selector', async () => {
+    const bridge = makeStubBridge();
+    const vw = new VWTestClient({}, bridge);
+    await vw.openApplication('MasLauncher', { classSelector: 'launch' });
+    expect(vi.mocked(bridge.postEval)).toHaveBeenCalledWith('MasLauncher launch');
   });
 
   it('rejects an invalid class name', async () => {

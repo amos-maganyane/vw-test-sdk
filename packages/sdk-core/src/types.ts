@@ -36,6 +36,56 @@ export interface WidgetValueResult {
   value: unknown;
 }
 
+export interface SelectRowResult {
+  ok: boolean;
+  index: number;
+  rowCount: number;
+  row: string;
+  state?: string;
+  dialogs?: unknown[];
+}
+
+export interface MenuItem {
+  label: string;
+  enabled?: boolean;
+  visible?: boolean;
+  hasSubmenu?: boolean;
+  items?: MenuItem[];
+  [key: string]: unknown;
+}
+
+export interface MenuTreeResult {
+  ok: boolean;
+  menus: MenuItem[];
+}
+
+export interface MenuClickResult {
+  ok: boolean;
+  state?: string;
+  dialogs?: unknown[];
+  windows?: unknown;
+}
+
+export interface TypedBridgeValue {
+  type: 'string' | 'number' | 'boolean' | 'nil' | 'collection' | 'opaque' | 'error';
+  value?: string | number | boolean | null;
+  repr?: string;
+  size?: number;
+}
+
+export interface StructuredReadResult {
+  ok: boolean;
+  root: string;
+  fields: Record<string, TypedBridgeValue>;
+}
+
+export interface StructuredRowsResult {
+  ok: boolean;
+  size: number;
+  returned: number;
+  rows: Array<Record<string, TypedBridgeValue>>;
+}
+
 /** Response from `GET /capabilities` (bridge >= 0.11.0). */
 export interface BridgeCapabilities {
   waitPredicates: string[];

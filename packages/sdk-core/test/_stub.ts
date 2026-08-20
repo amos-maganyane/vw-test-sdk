@@ -31,6 +31,7 @@ export interface StubConfig {
   value?: unknown;
   waitOk?: boolean;
   evalResult?: (source: string) => BridgeEvalResult;
+  jsonResult?: (path: string, body: unknown) => unknown;
 }
 
 export function makeStubBridge(cfg: StubConfig = {}): BridgeClientLike {
@@ -56,7 +57,8 @@ export function makeStubBridge(cfg: StubConfig = {}): BridgeClientLike {
       if (path.startsWith('/value')) return { ok: true, aspect: 'x', value: cfg.value ?? null };
       return {};
     }),
-    postJson: vi.fn(async (path: string) => {
+    postJson: vi.fn(async (path: string, body: unknown) => {
+      if (cfg.jsonResult !== undefined) return cfg.jsonResult(path, body);
       if (path === '/wait') return { ok: waitOk };
       return { ok: true };
     }),
