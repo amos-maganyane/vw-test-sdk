@@ -2,12 +2,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { captureFailureBundle, type AttachableTestInfo } from '../src/evidence.js';
+import { captureFailureBundle, selectEvidenceWindow, type AttachableTestInfo } from '../src/evidence.js';
 import type { VWTestClient } from '@enviro365/vw-test-sdk-core';
 
 function makeVw(overrides: Partial<Record<string, unknown>> = {}): VWTestClient {
   return {
-    screenshot: vi.fn(async () => Buffer.from([1, 2, 3])),
+    listWindows: vi.fn(async () => [{ title: 'storeTst64 (C:\\visualworks931\\image)', appClass: 'VisualLauncher' }]),
+    screenshot: vi.fn(async (_opts?: unknown) => Buffer.from([1, 2, 3])),
     snapshotState: vi.fn(async () => ({ windows: [], dialogs: [], recentLog: [] })),
     getActionLog: vi.fn(() => [{ ts: 1, kind: 'click' }]),
     ...overrides,
@@ -22,7 +23,7 @@ describe('captureFailureBundle', () => {
     await captureFailureBundle(makeVw(), testInfo);
 
     const names = attach.mock.calls.map((c) => c[0]);
-    expect(names).toContain('screenshot-full.png');
+    expect(names).toContain('screenshot-vw-window.png');
     expect(names).toContain('state.json');
     expect(names).toContain('actions.json');
   });
@@ -34,9 +35,28 @@ describe('captureFailureBundle', () => {
 
     await expect(captureFailureBundle(vw, testInfo)).resolves.toBeUndefined();
     const names = attach.mock.calls.map((c) => c[0]);
-    expect(names).toContain('screenshot-full.png');
+    expect(names).toContain('screenshot-vw-window.png');
     expect(names).toContain('actions.json');
     expect(names).not.toContain('state.json');
+  });
+
+  it('prefers the active business window over launchers and desktop-like windows', () => {
+    expect(
+      selectEvidenceWindow([
+        { title: 'Workspace' },
+        { title: 'storeTst64 (C:\\visualworks931\\image)', appClass: 'VisualLauncher' },
+        { title: 'Section 42 Transfer - Execution', appClass: 'Section42ExecutionView' },
+      ])?.title
+    ).toBe('Section 42 Transfer - Execution');
+  });
+
+  it('falls back to the VisualWorks image launcher when the test window was cleaned up', () => {
+    expect(
+      selectEvidenceWindow([
+        { title: 'GemStone Launcher' },
+        { title: 'storeTst64 (C:\\visualworks931\\image)', appClass: 'VisualLauncher' },
+      ])?.title
+    ).toContain('storeTst64');
   });
 
   it('attaches the bridge log tail when VW_BRIDGE_LOG is set', async () => {
