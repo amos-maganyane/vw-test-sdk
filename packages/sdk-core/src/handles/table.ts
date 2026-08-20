@@ -15,6 +15,13 @@ export interface RowMatch {
 }
 
 export class TableHandle extends WidgetHandle {
+  /** Edit one DataSet cell through the same column-model setter a user edit invokes. */
+  async setCell(rowIndex: number, column: string, value: string): Promise<void> {
+    const title = await this.ctx.resolveTitle();
+    await this.ctx.client.setDatasetCell(this.aspect, rowIndex, column, value, title);
+    this.ctx.invalidate();
+  }
+
   /** Best-effort row count from the model value (array length / numeric size). */
   async getRowCount(): Promise<number> {
     const v = await this.getValue();
