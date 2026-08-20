@@ -78,6 +78,19 @@ describe('CheckboxHandle', () => {
 });
 
 describe('TableHandle + DialogScope', () => {
+  it('setCell posts through the DataSet cell-edit endpoint', async () => {
+    const bridge = makeStubBridge();
+    const vw = new VWTestClient({}, bridge);
+    await vw.window('Win').table('dates').setCell(1, 'Source Date', '2026-08-10');
+    expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/set-dataset-cell', {
+      aspect: 'dates',
+      rowIndex: 1,
+      column: 'Source Date',
+      value: '2026-08-10',
+      windowTitle: 'Win',
+    });
+  });
+
   it('waitForRow waits on the listHasRow predicate', async () => {
     const bridge = makeStubBridge();
     const vw = new VWTestClient({}, bridge);
@@ -96,5 +109,18 @@ describe('TableHandle + DialogScope', () => {
     const vw = new VWTestClient({}, bridge);
     await vw.window('Win').dialog().respond('OK');
     expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/click', { aspect: 'OK', windowTitle: 'Win' });
+  });
+});
+
+describe('ListHandle', () => {
+  it('selectByText posts through the content-match row endpoint', async () => {
+    const bridge = makeStubBridge({
+      jsonResult: () => ({ ok: true, index: 2, rowCount: 4, row: 'Test fund (A)' }),
+    });
+    const vw = new VWTestClient({}, bridge);
+    await expect(vw.window('Search').list('funds').selectByText('Test fund')).resolves.toBe('Test fund (A)');
+    expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/select-row', {
+      aspect: 'funds', match: 'Test fund', windowTitle: 'Search',
+    });
   });
 });
