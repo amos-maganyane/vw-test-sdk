@@ -18,6 +18,8 @@ import {
   type BridgeEvalResult,
   type BridgeHealth,
   type BridgeVersion,
+  type RenderFrame,
+  type RenderRequestOptions,
 } from '@enviro365/vw-bridge-client';
 
 import { ActionLog, type ActionEvent } from './actionLog.js';
@@ -60,6 +62,7 @@ import type {
 import { WindowScope } from './window.js';
 import { buildWaitBody, type WaitOptions, type WaitPredicate } from './wait.js';
 import { buildScreenshotSpec, type ScreenshotOptions } from './screenshot.js';
+import { buildRenderSpec, type RenderOptions } from './render.js';
 
 const CLASS_NAME_RE = /^[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*$/;
 const SELECTOR_RE = /^[A-Za-z][A-Za-z0-9_]*:?$/;
@@ -336,15 +339,20 @@ export class VWTestClient {
     }
 
     const body = buildWaitBody(predicate, timeoutMs);
+    const waitDetail: Record<string, unknown> = { predicate: predicate.kind, timeoutMs };
+    const waitWindowTitle = body['windowTitle'];
+    if (typeof waitWindowTitle === 'string' && waitWindowTitle.length > 0) {
+      waitDetail['windowTitle'] = waitWindowTitle;
+    }
     let result: { ok?: boolean; error?: string };
     try {
       result = await this.bridge.postJson<{ ok?: boolean; error?: string }>('/wait', body);
     } catch (err) {
-      this.record('wait', { predicate: predicate.kind }, false, formatBridgeError(err));
+      this.record('wait', waitDetail, false, formatBridgeError(err));
       throw err;
     }
     const ok = result.ok !== false;
-    this.record('wait', { predicate: predicate.kind, timeoutMs }, ok, ok ? undefined : result.error ?? 'timed out');
+    this.record('wait', waitDetail, ok, ok ? undefined : result.error ?? 'timed out');
     if (!ok) {
       throw new TimeoutError(
         `wait(${predicate.kind}) not satisfied within ${timeoutMs}ms${result.error ? `: ${result.error}` : ''}`
@@ -372,8 +380,30 @@ export class VWTestClient {
   async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer> {
     const spec = buildScreenshotSpec(opts);
     const { bytes } = await this.bridge.postBinary('/screenshot', spec);
-    this.record('screenshot', { window: opts.windowTitle, appClass: opts.appClass });
+    if (opts.recordAction !== false) {
+      this.record('screenshot', { window: opts.windowTitle, appClass: opts.appClass });
+    }
     return Buffer.from(bytes);
+  }
+
+  /**
+   * POST /render → one in-image window frame as RAW pixels (not decoded).
+   * Rendering happens inside the image via an offscreen bitmap, so it does not
+   * depend on the OS desktop: occluded, unfocused and off-screen windows render
+   * correctly. Requires a window target (windowTitle and/or appClass).
+   */
+  async render(opts: RenderOptions = {}): Promise<RenderFrame> {
+    const spec = buildRenderSpec(opts);
+    const requestOptions: RenderRequestOptions = {};
+    if (spec.maxBytes !== undefined) requestOptions.maxBytes = spec.maxBytes;
+    const frame =
+      opts.timeoutMs !== undefined
+        ? await this.withTimeout(opts.timeoutMs, () => this.bridge.render(spec.target, requestOptions))
+        : await this.bridge.render(spec.target, requestOptions);
+    if (opts.recordAction !== false) {
+      this.record('render', { window: opts.windowTitle, appClass: opts.appClass });
+    }
+    return frame;
   }
 
   /** Windows + dialogs + recent action log, for failure evidence. */

@@ -48,6 +48,38 @@ export interface BridgeEvalResult {
   error?: string;
 }
 
+/**
+ * Window selector for POST /render. At least one of `titleContains` / `appClass`
+ * is required by the bridge; omitting both yields HTTP 400.
+ */
+export interface RenderTarget {
+  /** Case-insensitive window-title substring. */
+  titleContains?: string;
+  /** VW application class to disambiguate the window target. */
+  appClass?: string;
+}
+
+/** Optional knobs for POST /render. */
+export interface RenderRequestOptions {
+  /** Max raw bytes to transfer (bridge clamps 1..16_777_216). */
+  maxBytes?: number;
+}
+
+/**
+ * One in-image rendered frame: the window's view drawn into an offscreen
+ * `Pixmap` inside the VW image. `bytes` are RAW pixels (`width * height * 4`
+ * bytes, channel order given by `pixelFormat`) and are NOT decoded. Rendering
+ * does not consult the OS desktop, so it works for occluded / off-screen windows.
+ */
+export interface RenderFrame {
+  /** Raw pixel bytes, length `width * height * bytesPerPixel`. */
+  bytes: Uint8Array;
+  width: number;
+  height: number;
+  /** Pixel channel order reported by the bridge; verified live as 'bgra'. */
+  pixelFormat: string;
+}
+
 interface BridgeClientOptions {
   bridgeUrl: string;
   tokenFile: string;
@@ -74,6 +106,7 @@ export interface BridgeClientLike {
   postEvalRaw(source: string): Promise<string>;
   getBinary(path: string): Promise<{ bytes: Uint8Array; contentType: string }>;
   postBinary(path: string, jsonBody: unknown): Promise<{ bytes: Uint8Array; contentType: string }>;
+  render(target: RenderTarget, opts?: RenderRequestOptions): Promise<RenderFrame>;
 }
 
 export class BridgeClient implements BridgeClientLike {
@@ -177,6 +210,41 @@ export class BridgeClient implements BridgeClientLike {
     path: string,
     jsonBody: unknown
   ): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const { bytes, contentType } = await this.postBinaryWithHeaders(path, jsonBody);
+    return { bytes, contentType };
+  }
+
+  /**
+   * Auth'd POST /render — render a window inside the VW image into an offscreen
+   * bitmap and return its raw pixels (BGRA). Shares the auth + 401-retry path
+   * with postBinary; unlike /screenshot, dimensions/pixel format come back as
+   * response headers, so the header-aware core is used here.
+   */
+  async render(target: RenderTarget, opts: RenderRequestOptions = {}): Promise<RenderFrame> {
+    const body: Record<string, unknown> = { target: { ...target } };
+    if (opts.maxBytes !== undefined) body['maxBytes'] = opts.maxBytes;
+    const { bytes, headers } = await this.postBinaryWithHeaders('/render', body);
+    const width = requirePositiveIntHeader(headers, 'x-vwbridge-render-width');
+    const height = requirePositiveIntHeader(headers, 'x-vwbridge-render-height');
+    if (bytes.byteLength !== width * height * 4) {
+      throw new BridgeError(
+        200,
+        `render response is ${bytes.byteLength} bytes, expected ${width}x${height}x4`
+      );
+    }
+    return {
+      bytes,
+      width,
+      height,
+      pixelFormat: headers.get('x-vwbridge-render-pixelformat') ?? 'bgra',
+    };
+  }
+
+  /** Shared POST-with-JSON-body + binary-response core for postBinary / render. */
+  private async postBinaryWithHeaders(
+    path: string,
+    jsonBody: unknown
+  ): Promise<{ bytes: Uint8Array; contentType: string; headers: Headers }> {
     for (let attempt = 0; attempt < 2; attempt++) {
       const token = await this.readToken();
       const res = await this.doFetch(
@@ -202,9 +270,10 @@ export class BridgeClient implements BridgeClientLike {
       return {
         bytes: new Uint8Array(buf),
         contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+        headers: res.headers,
       };
     }
-    throw new BridgeError(500, 'BridgeClient.postBinary retry loop fell through');
+    throw new BridgeError(500, 'BridgeClient.postBinaryWithHeaders retry loop fell through');
   }
 
   // -------------------------------------------------------------------------
@@ -324,4 +393,13 @@ export class BridgeClient implements BridgeClientLike {
       return '';
     }
   }
+}
+
+/** Parse a required positive-integer response header, throwing BridgeError when absent/invalid. */
+function requirePositiveIntHeader(headers: Headers, name: string): number {
+  const value = Number.parseInt(headers.get(name) ?? '', 10);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new BridgeError(200, `render response missing/invalid header ${name}`);
+  }
+  return value;
 }

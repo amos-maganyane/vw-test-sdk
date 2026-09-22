@@ -291,6 +291,72 @@ describe('BridgeClient — error mapping', () => {
   });
 });
 
+describe('BridgeClient — render', () => {
+  function renderResponse(bytes: Uint8Array, width: number, height: number): Response {
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-VWBridge-Render-Width': String(width),
+        'X-VWBridge-Render-Height': String(height),
+        'X-VWBridge-Render-PixelFormat': 'bgra',
+      },
+    });
+  }
+
+  it('render() POSTs /render and returns raw bytes + dims from headers', async () => {
+    const width = 2;
+    const height = 1;
+    const bytes = new Uint8Array(width * height * 4);
+    vi.mocked(fetch).mockResolvedValueOnce(renderResponse(bytes, width, height));
+    const tokenFile = await makeTokenFile('tok-1');
+    const client = new BridgeClient({ bridgeUrl: 'http://127.0.0.1:9876', tokenFile });
+
+    const frame = await client.render({ titleContains: 'storedev64' }, { maxBytes: 1024 });
+
+    expect(frame.bytes).toHaveLength(width * height * 4);
+    expect(frame.width).toBe(width);
+    expect(frame.height).toBe(height);
+    expect(frame.pixelFormat).toBe('bgra');
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(call?.[0]).toBe('http://127.0.0.1:9876/render');
+    const init = call?.[1];
+    expect(init?.method).toBe('POST');
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer tok-1');
+    expect(init?.body).toBe(JSON.stringify({ target: { titleContains: 'storedev64' }, maxBytes: 1024 }));
+  });
+
+  it('render() rejects when the body size does not match the reported dimensions', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(renderResponse(new Uint8Array(8), 2, 2));
+    const tokenFile = await makeTokenFile('tok-1');
+    const client = new BridgeClient({ bridgeUrl: 'http://test', tokenFile });
+
+    await expect(client.render({ titleContains: 'x' })).rejects.toMatchObject({ status: 200 });
+  });
+
+  it('render() inherits the 401 retry-and-rotate path', async () => {
+    const tokenFile = await makeTokenFile('tok-stale');
+    let callCount = 0;
+    vi.mocked(fetch).mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        await fs.writeFile(tokenFile, 'tok-fresh', 'utf-8');
+        return new Response('unauthorized', { status: 401 });
+      }
+      return renderResponse(new Uint8Array(4), 1, 1);
+    });
+    const client = new BridgeClient({ bridgeUrl: 'http://test', tokenFile });
+
+    const frame = await client.render({ appClass: 'VisualLauncher' });
+
+    expect(frame.width).toBe(1);
+    expect(callCount).toBe(2);
+    const headers = (vi.mocked(fetch).mock.calls[1]?.[1]?.headers ?? {}) as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer tok-fresh');
+  });
+});
+
 describe('BridgeClient — postRaw (string responses)', () => {
   it('postEvalRaw() returns raw response text', async () => {
     const tokenFile = await makeTokenFile('tok-1');

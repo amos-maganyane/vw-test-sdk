@@ -51,6 +51,9 @@ export type { WaitPredicate, WaitOptions } from './wait.js';
 // Screenshot
 export type { ScreenshotOptions } from './screenshot.js';
 
+// In-image render (POST /render)
+export type { RenderOptions } from './render.js';
+
 // Action log
 export { ActionLog } from './actionLog.js';
 export type { ActionEvent } from './actionLog.js';
@@ -81,4 +84,7 @@ export type {
   BridgeHealth,
   BridgeVersion,
   BridgeEvalResult,
+  RenderTarget,
+  RenderRequestOptions,
+  RenderFrame,
 } from '@enviro365/vw-bridge-client';

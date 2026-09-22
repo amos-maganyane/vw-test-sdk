@@ -12,5 +12,8 @@ export type {
   BridgeHealth,
   BridgeVersion,
   BridgeEvalResult,
+  RenderTarget,
+  RenderRequestOptions,
+  RenderFrame,
 } from './bridge.js';
 export { BridgeError, formatBridgeError } from './util.js';

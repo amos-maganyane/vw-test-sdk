@@ -66,6 +66,12 @@ export function makeStubBridge(cfg: StubConfig = {}): BridgeClientLike {
     postEvalRaw: vi.fn(async () => '{}'),
     getBinary: vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]), contentType: 'image/png' })),
     postBinary: vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]), contentType: 'image/png' })),
+    render: vi.fn(async () => ({
+      bytes: new Uint8Array([1, 2, 3, 4]),
+      width: 1,
+      height: 1,
+      pixelFormat: 'bgra',
+    })),
   };
 
   return stub as unknown as BridgeClientLike;

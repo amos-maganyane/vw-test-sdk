@@ -245,6 +245,33 @@ describe('VWTestClient — evidence + utilities', () => {
     expect(buf).toHaveLength(3);
   });
 
+  it('screenshot records an action by default but not with recordAction:false', async () => {
+    const vw = new VWTestClient({}, makeStubBridge());
+    await vw.screenshot({ recordAction: false });
+    expect(vw.getActionLog().some((e) => e.kind === 'screenshot')).toBe(false);
+    await vw.screenshot();
+    expect(vw.getActionLog().some((e) => e.kind === 'screenshot')).toBe(true);
+  });
+
+  it('render delegates to the bridge with a window target and returns the raw frame', async () => {
+    const bridge = makeStubBridge();
+    const vw = new VWTestClient({}, bridge);
+    const frame = await vw.render({ windowTitle: 'storedev64', maxBytes: 4096 });
+    expect(frame).toMatchObject({ width: 1, height: 1, pixelFormat: 'bgra' });
+    expect(vi.mocked(bridge.render)).toHaveBeenCalledWith(
+      { titleContains: 'storedev64' },
+      { maxBytes: 4096 }
+    );
+  });
+
+  it('render records an action by default but not with recordAction:false', async () => {
+    const vw = new VWTestClient({}, makeStubBridge());
+    await vw.render({ appClass: 'VisualLauncher', recordAction: false });
+    expect(vw.getActionLog().some((e) => e.kind === 'render')).toBe(false);
+    await vw.render({ appClass: 'VisualLauncher' });
+    expect(vw.getActionLog().some((e) => e.kind === 'render')).toBe(true);
+  });
+
   it('records actions to the action log', async () => {
     const vw = new VWTestClient({}, makeStubBridge());
     await vw.clickWidget('b', 'W');
