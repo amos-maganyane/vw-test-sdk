@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureFailureBundle, selectEvidenceWindow, type AttachableTestInfo } from '../src/evidence.js';
+import type { RecordedVideo } from '../src/video.js';
 import type { VWTestClient } from '@enviro365/vw-test-sdk-core';
 
 function makeVw(overrides: Partial<Record<string, unknown>> = {}): VWTestClient {
@@ -73,5 +74,55 @@ describe('captureFailureBundle', () => {
       vi.unstubAllEnvs();
       await fs.unlink(logPath).catch(() => {});
     }
+  });
+
+  it('attaches a provided recording alongside the still evidence', async () => {
+    const attach = vi.fn(async (_name: string, _options?: unknown) => {});
+    const testInfo = { attach } as unknown as AttachableTestInfo;
+    const videoAttach = vi.fn(async (_testInfo: AttachableTestInfo) => {});
+    const video: RecordedVideo = {
+      frameCount: 3,
+      framePaths: [],
+      fps: 1,
+      warning: undefined,
+      attach: videoAttach,
+      discard: vi.fn(async () => {}),
+    };
+
+    await captureFailureBundle(makeVw(), testInfo, video);
+
+    expect(videoAttach).toHaveBeenCalledWith(testInfo);
+    expect(attach.mock.calls.map((c) => c[0])).toContain('screenshot-vw-window.png');
+  });
+
+  it('still attaches the recording when the still evidence was captured first', async () => {
+    const attach = vi.fn(async (_name: string, _options?: unknown) => {});
+    const testInfo = { attach } as unknown as AttachableTestInfo;
+    const videoAttach = vi.fn(async (_testInfo: AttachableTestInfo) => {});
+    const video: RecordedVideo = {
+      frameCount: 3,
+      framePaths: [],
+      fps: 1,
+      warning: undefined,
+      attach: videoAttach,
+      discard: vi.fn(async () => {}),
+    };
+
+    await captureFailureBundle(makeVw(), testInfo);
+    await captureFailureBundle(makeVw(), testInfo, video);
+
+    expect(videoAttach).toHaveBeenCalledWith(testInfo);
+    expect(attach.mock.calls.filter((c) => c[0] === 'screenshot-vw-window.png')).toHaveLength(1);
+  });
+
+  it('does not touch video machinery when no recording is provided', async () => {
+    const attach = vi.fn(async (_name: string, _options?: unknown) => {});
+    const testInfo = { attach } as unknown as AttachableTestInfo;
+
+    await captureFailureBundle(makeVw(), testInfo);
+
+    const names = attach.mock.calls.map((c) => c[0]);
+    expect(names).not.toContain('video.mp4');
+    expect(names.filter((name) => name.startsWith('video-frames/'))).toHaveLength(0);
   });
 });

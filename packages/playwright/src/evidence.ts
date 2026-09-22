@@ -9,10 +9,15 @@
  *   2. windows + dialogs + log   (vw.snapshotState)
  *   3. action log (last N)       (vw.getActionLog — in-process)
  *   4. bridge log tail           (VW_BRIDGE_LOG file, if configured)
+ *
+ * When failure video is enabled (VW_VIDEO=1) the fixture additionally passes the
+ * stopped `RecordedVideo`, which attaches a 5th artifact (`video.mp4`, or the
+ * raw-frame fallback — see video.ts).
  */
 
 import { promises as fs } from 'node:fs';
 import type { VWTestClient, WindowSummary } from '@enviro365/vw-test-sdk-core';
+import type { RecordedVideo } from './video.js';
 
 /** Subset of Playwright's TestInfo this module needs (keeps it unit-testable). */
 export interface AttachableTestInfo {
@@ -70,29 +75,41 @@ async function captureVisualWorksWindow(vw: VWTestClient): Promise<Buffer> {
 }
 
 /** Capture + attach the failure-evidence bundle. Never throws. */
-export async function captureFailureBundle(vw: VWTestClient, testInfo: AttachableTestInfo): Promise<void> {
-  if (capturedTestInfos.has(testInfo)) return;
+export async function captureFailureBundle(
+  vw: VWTestClient,
+  testInfo: AttachableTestInfo,
+  video?: RecordedVideo
+): Promise<void> {
+  const alreadyCaptured = capturedTestInfos.has(testInfo);
   capturedTestInfos.add(testInfo);
   const bridgeLogPath = process.env['VW_BRIDGE_LOG'];
 
-  const tasks: Array<Promise<unknown>> = [
-    withTimeout(SCREENSHOT_TIMEOUT_MS, captureVisualWorksWindow(vw)).then((buf) =>
-      testInfo.attach('screenshot-vw-window.png', { body: buf, contentType: 'image/png' })
-    ),
-    withTimeout(STATE_TIMEOUT_MS, vw.snapshotState()).then((snap) =>
-      testInfo.attach('state.json', { body: JSON.stringify(snap, null, 2), contentType: 'application/json' })
-    ),
-    Promise.resolve(vw.getActionLog()).then((log) =>
-      testInfo.attach('actions.json', { body: JSON.stringify(log, null, 2), contentType: 'application/json' })
-    ),
-  ];
+  const tasks: Array<Promise<unknown>> = [];
 
-  if (bridgeLogPath !== undefined) {
+  if (!alreadyCaptured) {
     tasks.push(
-      withTimeout(BRIDGE_LOG_TIMEOUT_MS, readLogTail(bridgeLogPath, 100)).then((tail) =>
-        testInfo.attach('bridge.log', { body: tail, contentType: 'text/plain' })
-      )
+      withTimeout(SCREENSHOT_TIMEOUT_MS, captureVisualWorksWindow(vw)).then((buf) =>
+        testInfo.attach('screenshot-vw-window.png', { body: buf, contentType: 'image/png' })
+      ),
+      withTimeout(STATE_TIMEOUT_MS, vw.snapshotState()).then((snap) =>
+        testInfo.attach('state.json', { body: JSON.stringify(snap, null, 2), contentType: 'application/json' })
+      ),
+      Promise.resolve(vw.getActionLog()).then((log) =>
+        testInfo.attach('actions.json', { body: JSON.stringify(log, null, 2), contentType: 'application/json' })
+      ),
     );
+
+    if (bridgeLogPath !== undefined) {
+      tasks.push(
+        withTimeout(BRIDGE_LOG_TIMEOUT_MS, readLogTail(bridgeLogPath, 100)).then((tail) =>
+          testInfo.attach('bridge.log', { body: tail, contentType: 'text/plain' })
+        )
+      );
+    }
+  }
+
+  if (video !== undefined) {
+    tasks.push(video.attach(testInfo));
   }
 
   await Promise.allSettled(tasks);
