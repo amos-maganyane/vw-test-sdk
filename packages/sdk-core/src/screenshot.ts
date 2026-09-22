@@ -18,6 +18,13 @@ export interface ScreenshotOptions {
   timeoutMs?: number;
   /** Max PNG bytes (1..16 MiB). */
   maxBytes?: number;
+  /**
+   * When false, the capture is not appended to the rolling action log. Default
+   * true (unchanged). High-frequency consumers (failure-video frame polling)
+   * pass false so their captures cannot evict real test actions from the
+   * last-N evidence log.
+   */
+  recordAction?: boolean;
 }
 
 export function buildScreenshotSpec(opts: ScreenshotOptions): Record<string, unknown> {

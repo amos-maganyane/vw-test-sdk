@@ -18,3 +18,7 @@ allowBuilds:
   # needed. `false` both skips the heavy download AND clears ERR_PNPM_IGNORED_BUILDS.
   playwright: false
   playwright-core: false
+  # Optional video assembly (VW_VIDEO=1). ffmpeg-static's postinstall downloads a
+  # ~80 MB platform binary from GitHub releases; required for the encode step,
+  # and only this package's optionalDependency so its failure never blocks install.
+  ffmpeg-static: true
