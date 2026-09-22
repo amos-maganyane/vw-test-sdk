@@ -14,6 +14,9 @@ export type { MatcherOptions, MatcherResult } from './matchers.js';
 export { captureFailureBundle } from './evidence.js';
 export type { AttachableTestInfo } from './evidence.js';
 
+export { startVideoRecording, resolveFfmpegPath } from './video.js';
+export type { RecordedVideo, VideoRecorder, VideoRecordingOptions } from './video.js';
+
 export { createClientFromEnv, clientOptionsFromEnv } from './clientFromEnv.js';
 
 export { VWReporter } from './reporter.js';
