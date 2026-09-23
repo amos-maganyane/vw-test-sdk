@@ -52,7 +52,24 @@ export type { WaitPredicate, WaitOptions } from './wait.js';
 export type { ScreenshotOptions } from './screenshot.js';
 
 // In-image render (POST /render)
-export type { RenderOptions } from './render.js';
+export type { RenderOptions, HighlightedRenderFrame } from './render.js';
+
+// Interaction highlighting for captured evidence
+export {
+  buildWidgetRectSource,
+  parseWidgetRect,
+  composeHighlightBorder,
+  highlightColorForPurpose,
+  findLatestInteraction,
+  DEFAULT_HIGHLIGHT_THICKNESS,
+} from './highlight.js';
+export type {
+  HighlightPurpose,
+  HighlightRenderOptions,
+  InteractionTarget,
+  WidgetRect,
+  RgbColor,
+} from './highlight.js';
 
 // Action log
 export { ActionLog } from './actionLog.js';

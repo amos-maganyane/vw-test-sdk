@@ -17,6 +17,8 @@ export type { AttachableTestInfo } from './evidence.js';
 export { startVideoRecording, resolveFfmpegPath } from './video.js';
 export type { RecordedVideo, VideoRecorder, VideoRecordingOptions } from './video.js';
 
+export { encodeBgraToPng } from './png.js';
+
 export { createClientFromEnv, clientOptionsFromEnv } from './clientFromEnv.js';
 
 export { VWReporter } from './reporter.js';

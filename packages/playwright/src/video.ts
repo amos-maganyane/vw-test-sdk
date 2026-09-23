@@ -123,6 +123,12 @@ export interface VideoRecordingOptions {
    * explicit `windowTitle` / `appClass` override is configured.
    */
   targetWaitMs?: number;
+  /**
+   * Composite a high-contrast border at the most recent widget interaction into
+   * every frame; default `VW_HIGHLIGHT` env (truthy). The border is painted into
+   * the frame buffer before PNG encoding, so it appears in the assembled video.
+   */
+  highlight?: boolean;
 }
 
 /** The window POST /render targets (exactly one source is needed by the bridge). */
@@ -165,6 +171,7 @@ export function startVideoRecording(
       frameDir: opts.frameDir,
       window: resolveConfiguredWindow(opts),
       targetWaitMs: resolveTargetWaitMs(opts.targetWaitMs),
+      highlight: resolveHighlightEnabled(opts),
     });
   } catch (error) {
     console.warn(`vw-test-sdk: video capture disabled — ${messageOf(error)}`);
@@ -256,6 +263,7 @@ interface FrameRecorderConfig {
   frameDir: string | undefined;
   window: RenderWindow | undefined;
   targetWaitMs: number;
+  highlight: boolean;
 }
 
 class FrameRecorder implements VideoRecorder, RecordedVideo {
@@ -264,6 +272,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   private readonly vw: VWTestClient;
   private readonly configuredWindow: RenderWindow | undefined;
   private readonly targetWaitMs: number;
+  private readonly highlightEnabled: boolean;
   private readonly startedAt: number;
   private readonly paths: string[] = [];
   private readonly times: number[] = [];
@@ -288,6 +297,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
     this.frameDir = config.frameDir ?? join(tmpdir(), `vw-test-sdk-video-${process.pid}-${Date.now()}`);
     this.configuredWindow = config.window;
     this.targetWaitMs = config.targetWaitMs;
+    this.highlightEnabled = config.highlight;
     this.startedAt = Date.now();
     mkdirSync(this.frameDir, { recursive: true });
     this.timer = setInterval(() => void this.captureFrame(), Math.round(1000 / this.fps));
@@ -398,7 +408,9 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
         // Sampled before the request: that is the moment the bridge renders the
         // screen state this frame shows, and it anchors the frame's hold time.
         const sampledAt = Date.now();
-        const frame = await this.vw.render(renderOptionsFor(window, timeoutMs));
+        const frame = await this.vw.render(
+          renderOptionsFor(window, timeoutMs, this.highlightEnabled)
+        );
         const guard = inspectFrame(frame.bytes, frame.width, frame.height);
         if (!guard.clean) {
           this.captureError = `frame refused by content guard: ${guard.reason ?? 'unknown'}`;
@@ -676,11 +688,17 @@ function nonEmptyEnv(name: string): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
 }
 
-function renderOptionsFor(window: RenderWindow, timeoutMs: number): RenderOptions {
+function renderOptionsFor(window: RenderWindow, timeoutMs: number, highlight: boolean): RenderOptions {
   const opts: RenderOptions = { timeoutMs, recordAction: false };
   if (window.windowTitle !== undefined) opts.windowTitle = window.windowTitle;
   if (window.appClass !== undefined) opts.appClass = window.appClass;
+  if (highlight) opts.highlight = true;
   return opts;
+}
+
+function resolveHighlightEnabled(opts: VideoRecordingOptions): boolean {
+  if (opts.highlight !== undefined) return opts.highlight;
+  return TRUTHY_VALUES.has((process.env['VW_HIGHLIGHT'] ?? '').toLowerCase());
 }
 
 function findFfmpegOnPath(): string | undefined {

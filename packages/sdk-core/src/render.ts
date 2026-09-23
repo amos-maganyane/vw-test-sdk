@@ -9,7 +9,8 @@
  * appClass MUST be supplied or the bridge answers HTTP 400.
  */
 
-import type { RenderTarget } from '@enviro365/vw-bridge-client';
+import type { RenderFrame, RenderTarget } from '@enviro365/vw-bridge-client';
+import type { HighlightRenderOptions, WidgetRect } from './highlight.js';
 
 export interface RenderOptions {
   /** Case-insensitive window-title substring. */
@@ -27,6 +28,23 @@ export interface RenderOptions {
    * last-N evidence log.
    */
   recordAction?: boolean;
+  /**
+   * Composite a high-contrast border onto the rendered frame at a widget
+   * interaction's rectangle, so the highlight is present in the evidence
+   * pixels (stills AND video). `true` points at the most recent interactive
+   * action in the client's action log; an object pins aspect/window/purpose.
+   * No-op when no rectangle can be resolved.
+   */
+  highlight?: boolean | HighlightRenderOptions;
+}
+
+/**
+ * A rendered frame that may carry a composited highlight. `highlight` is the
+ * window-local rectangle painted, when one was resolved.
+ */
+export interface HighlightedRenderFrame extends RenderFrame {
+  highlight?: WidgetRect;
+  highlightAspect?: string;
 }
 
 export interface RenderSpec {

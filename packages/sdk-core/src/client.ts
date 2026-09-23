@@ -25,6 +25,16 @@ import {
 import { ActionLog, type ActionEvent } from './actionLog.js';
 import { checkEvalSafety } from './evalGuards.js';
 import {
+  buildWidgetRectSource,
+  composeHighlightBorder,
+  findLatestInteraction,
+  highlightColorForPurpose,
+  parseWidgetRect,
+  type HighlightRenderOptions,
+  type RgbColor,
+  type WidgetRect,
+} from './highlight.js';
+import {
   BridgeCompatibilityError,
   EvalGuardError,
   ExclusiveBridgeViolationError,
@@ -62,7 +72,7 @@ import type {
 import { WindowScope } from './window.js';
 import { buildWaitBody, type WaitOptions, type WaitPredicate } from './wait.js';
 import { buildScreenshotSpec, type ScreenshotOptions } from './screenshot.js';
-import { buildRenderSpec, type RenderOptions } from './render.js';
+import { buildRenderSpec, type HighlightedRenderFrame, type RenderOptions } from './render.js';
 
 const CLASS_NAME_RE = /^[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*$/;
 const SELECTOR_RE = /^[A-Za-z][A-Za-z0-9_]*:?$/;
@@ -392,7 +402,7 @@ export class VWTestClient {
    * depend on the OS desktop: occluded, unfocused and off-screen windows render
    * correctly. Requires a window target (windowTitle and/or appClass).
    */
-  async render(opts: RenderOptions = {}): Promise<RenderFrame> {
+  async render(opts: RenderOptions = {}): Promise<HighlightedRenderFrame> {
     const spec = buildRenderSpec(opts);
     const requestOptions: RenderRequestOptions = {};
     if (spec.maxBytes !== undefined) requestOptions.maxBytes = spec.maxBytes;
@@ -400,10 +410,56 @@ export class VWTestClient {
       opts.timeoutMs !== undefined
         ? await this.withTimeout(opts.timeoutMs, () => this.bridge.render(spec.target, requestOptions))
         : await this.bridge.render(spec.target, requestOptions);
+    const result = opts.highlight ? await this.applyRenderHighlight(frame, opts) : frame;
     if (opts.recordAction !== false) {
       this.record('render', { window: opts.windowTitle, appClass: opts.appClass });
     }
-    return frame;
+    return result;
+  }
+
+  /**
+   * Resolve a widget's window-local rectangle from the live image over the
+   * existing `/eval` surface (no bridge change). The rectangle is in the same
+   * coordinate space `POST /render` paints (both are relative to the window
+   * content origin). Answers null when the aspect cannot be found. Not written
+   * to the action log — this is evidence plumbing, not a test interaction.
+   */
+  async resolveWidgetRect(aspect: string, windowTitle?: string): Promise<WidgetRect | null> {
+    const source = buildWidgetRectSource(aspect, windowTitle);
+    const safety = checkEvalSafety(source);
+    if (!safety.safe) {
+      throw new EvalGuardError(safety.reason ?? 'resolveWidgetRect refused by safety guard');
+    }
+    const result = await this.bridge.postEval(source);
+    if (!result.ok) return null;
+    return parseWidgetRect(result.result ?? '');
+  }
+
+  private async applyRenderHighlight(
+    frame: RenderFrame,
+    opts: RenderOptions
+  ): Promise<HighlightedRenderFrame> {
+    const highlight: HighlightRenderOptions =
+      typeof opts.highlight === 'object' ? opts.highlight : {};
+    const latest =
+      highlight.aspect === undefined ? findLatestInteraction(this.log.entries()) : null;
+    const aspect = highlight.aspect ?? latest?.aspect;
+    if (aspect === undefined) return frame;
+    const windowTitle = highlight.windowTitle ?? latest?.windowTitle ?? opts.windowTitle;
+    const purpose = highlight.purpose ?? latest?.purpose ?? 'focus';
+    let rect: WidgetRect | null = null;
+    try {
+      rect = await this.resolveWidgetRect(aspect, windowTitle);
+    } catch {
+      rect = null;
+    }
+    if (rect === null) return { ...frame, highlightAspect: aspect };
+    const composeOptions: { color: RgbColor; thickness?: number } = {
+      color: highlightColorForPurpose(purpose),
+    };
+    if (highlight.thickness !== undefined) composeOptions.thickness = highlight.thickness;
+    composeHighlightBorder(frame.bytes, frame.width, frame.height, rect, composeOptions);
+    return { ...frame, highlight: rect, highlightAspect: aspect };
   }
 
   /** Windows + dialogs + recent action log, for failure evidence. */
