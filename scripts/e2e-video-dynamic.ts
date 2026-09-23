@@ -1,10 +1,13 @@
 /**
  * e2e-video-dynamic.ts — live proof that the failure-video recorder resolves its
- * render target DYNAMICALLY.
+ * render target DYNAMICALLY and films the APPLICATION window.
  *
- * Scenario (mirrors the real failure): at bridge start the only live windows are
- * VW tool windows. The recorder starts, then a NEW window appears AFTER start.
- * The recorder must pick it up and capture non-blank frames from it.
+ * Scenario (mirrors the real failure): VW tool windows (VisualLauncher,
+ * GbxVisualLauncher, Workbook — the flat yellow ones) are live alongside the
+ * application window. The recorder must never capture a tool window; it must
+ * resolve the application window and produce non-blank frames of it.
+ *
+ * Requires MAS to be logged in, so the application window already exists.
  *
  * Run: pnpm tsx scripts/e2e-video-dynamic.ts
  * Requires: live bridge (profile=test) + ffmpeg-static.
@@ -17,14 +20,7 @@ import { join } from 'node:path';
 import { VWTestClient } from '@enviro365/vw-test-sdk-core';
 import { startVideoRecording, resolveFfmpegPath } from '../packages/playwright/src/video.js';
 
-const TARGET_TITLE = 'Workspace';
-const OPEN_WORKSPACE =
-  `[[Tools.Workbook open. 'OPENED'] on: Core.Notification do: [:n | n resume. 'RESUMED']] ` +
-  `on: Core.Exception do: [:e | 'ERR: ' , e messageText]`;
-const CLOSE_WORKSPACE =
-  `ScheduledControllers scheduledControllers do: [:c | ` +
-  `(c view notNil and: [c view label asString = '${TARGET_TITLE}']) ifTrue: ` +
-  `[[c view close] on: Core.Exception do: [:e | nil]]]. 'closed'`;
+const TARGET_TITLE = process.env['E2E_APP_TITLE'] ?? 'MOMENTUM WEALTH';
 
 function distinctColours(bgra: Buffer): number {
   const seen = new Set<number>();
@@ -42,12 +38,10 @@ async function main(): Promise<void> {
 
   console.log('1. bridge health:', JSON.stringify(await vw.health()));
 
-  await vw.evaluate(CLOSE_WORKSPACE);
-  await new Promise((r) => setTimeout(r, 500));
   const before = await vw.listWindows();
   console.log('2. windows at start:', before.map((w) => w.title).join(' | '));
-  if (before.some((w) => w.title.includes(TARGET_TITLE))) {
-    throw new Error('target window still open — aborting to keep the test honest');
+  if (!before.some((w) => w.title.includes(TARGET_TITLE))) {
+    throw new Error(`application window "${TARGET_TITLE}" is not open - log into MAS first`);
   }
 
   process.env['VW_VIDEO'] = '1';
@@ -57,18 +51,10 @@ async function main(): Promise<void> {
   console.log('3. recorder started (target not yet resolved)');
 
   await new Promise((r) => setTimeout(r, 600));
-  console.log(`4. frames before target window exists: ${recorder.frameCount}`);
+  console.log(`4. frames captured so far: ${recorder.frameCount}`);
 
-  await vw.evaluate(OPEN_WORKSPACE);
-  await new Promise((r) => setTimeout(r, 800));
   const after = await vw.listWindows();
-  console.log('5. windows after open:', after.map((w) => w.title).join(' | '));
-  if (!after.some((w) => w.title.includes(TARGET_TITLE))) {
-    throw new Error('target window did not open');
-  }
-
-  await vw.getWidgetValue('importSummary', TARGET_TITLE);
-  console.log('6. recorded an interactive action naming the target window');
+  console.log('5. windows while recording:', after.map((w) => w.title).join(' | '));
 
   await new Promise((r) => setTimeout(r, 1500));
   const recording = await recorder.stop();
@@ -118,7 +104,7 @@ async function main(): Promise<void> {
   console.log(`10. cleaned up (${existsSync(frameDir) ? 'frames remain' : 'frames deleted'})`);
 
   if (colours < 2) throw new Error(`frame is blank (${colours} distinct colour(s))`);
-  console.log('E2E PASSED: window appearing after recorder start was captured non-blank');
+  console.log('E2E PASSED: application window captured non-blank; frame bytes match its bounds');
 }
 
 main().catch((err: unknown) => {

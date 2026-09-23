@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach, type Mock } from 'vitest';
-import { existsSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -9,10 +10,11 @@ import {
   type VideoRecorder,
   type RecordedVideo,
 } from '../src/video.js';
+import { buildConcatFile, computeFrameDurations } from '../src/frameTimeline.js';
 import type { AttachableTestInfo } from '../src/evidence.js';
 import type { VWTestClient } from '@enviro365/vw-test-sdk-core';
 
-const WINDOW = { title: 'storedev64 (C:\\visualworks931\\image)', appClass: 'VisualLauncher' };
+const WINDOW = { title: 'MOMENTUM WEALTH', appClass: 'MasLauncher' };
 
 function makeBgraFrame(width = 64, height = 64): {
   bytes: Uint8Array;
@@ -193,7 +195,66 @@ describe('startVideoRecording', () => {
   });
 });
 
-const FFMPEG_AVAILABLE = (await resolveFfmpegPath()) !== undefined;
+const FFMPEG_PATH = await resolveFfmpegPath();
+const FFMPEG_AVAILABLE = FFMPEG_PATH !== undefined;
+
+/** Format duration in seconds, read from ffmpeg's own demuxer report. */
+function probeDurationSeconds(ffmpegPath: string, videoPath: string): number {
+  const result = spawnSync(ffmpegPath, ['-hide_banner', '-i', videoPath], { encoding: 'utf-8' });
+  const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(`${result.stderr ?? ''}`);
+  if (match === null) throw new Error(`ffmpeg reported no Duration for ${videoPath}`);
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+/** Frames ffmpeg actually decodes — proves frames are held, not dropped. */
+function probeDecodedFrameCount(ffmpegPath: string, videoPath: string): number {
+  const result = spawnSync(
+    ffmpegPath,
+    ['-hide_banner', '-i', videoPath, '-map', '0:v:0', '-f', 'null', '-'],
+    { encoding: 'utf-8' }
+  );
+  const matches = [...`${result.stderr ?? ''}`.matchAll(/frame=\s*(\d+)/g)];
+  if (matches.length === 0) throw new Error(`ffmpeg decoded no frames from ${videoPath}`);
+  return Number(matches[matches.length - 1][1]);
+}
+
+describe('frame timeline', () => {
+  it('gives each frame the real gap to the next and holds the last until stop', () => {
+    expect(computeFrameDurations([1_000, 6_200, 11_050], 17_080)).toEqual([5.2, 4.85, 6.03]);
+  });
+
+  it('clamps a zero or negative hold from a post-stop top-up to a minimum', () => {
+    expect(computeFrameDurations([5_000, 5_000, 5_100], 4_900)).toEqual([0.05, 0.1, 0.05]);
+  });
+
+  it('yields no durations for no frames', () => {
+    expect(computeFrameDurations([], 1_000)).toEqual([]);
+  });
+
+  it('writes a concat list with one duration per frame and a repeated final file', () => {
+    expect(buildConcatFile(['frame-0001.png', 'frame-0002.png'], [5.2, 4.85])).toBe(
+      [
+        'ffconcat version 1.0',
+        "file 'frame-0001.png'",
+        'duration 5.200',
+        "file 'frame-0002.png'",
+        'duration 4.850',
+        "file 'frame-0002.png'",
+        '',
+      ].join('\n')
+    );
+  });
+
+  it('builds a valid single-frame list so one frame is never zero-length', () => {
+    const list = buildConcatFile(['frame-0001.png'], [6.03]);
+    expect(list.match(/file 'frame-0001\.png'/g)).toHaveLength(2);
+    expect(list).toContain('duration 6.030');
+  });
+
+  it('rejects a frame/duration length mismatch', () => {
+    expect(() => buildConcatFile(['frame-0001.png'], [1, 2])).toThrow();
+  });
+});
 
 describe('dynamic target resolution', () => {
   afterEach(() => {
@@ -224,7 +285,7 @@ describe('dynamic target resolution', () => {
     await recording.discard();
   });
 
-  it('picks up a window that appears AFTER the recorder starts', async () => {
+  it('defers on tool windows, then films the app window that appears AFTER the recorder starts', async () => {
     vi.stubEnv('VW_VIDEO', '1');
     vi.stubEnv('VW_VIDEO_FPS', '10');
     let appOpen = false;
@@ -238,13 +299,18 @@ describe('dynamic target resolution', () => {
     });
 
     const recorder = startVideoRecording(vw)!;
-    await waitForFrames(recorder, 1);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Only VW tool windows are live: the recorder must defer, not film the launcher.
+    expect(recorder.frameCount).toBe(0);
+    expect(vw.render).not.toHaveBeenCalled();
+
     appOpen = true;
-    await waitForFrames(recorder, 3);
+    await waitForFrames(recorder, 2);
     const recording = await recorder.stop();
 
     const calls = vi.mocked(vw.render).mock.calls.map((call) => call[0] as { windowTitle?: string });
-    expect(calls.some((opts) => opts.windowTitle === APP_WINDOW.title)).toBe(true);
+    expect(calls.every((opts) => opts.windowTitle === APP_WINDOW.title)).toBe(true);
+    expect(recording.warning).toBeUndefined();
     await recording.discard();
   });
 
@@ -315,18 +381,139 @@ describe('dynamic target resolution', () => {
   });
 });
 
+describe('VW tool-window deferral', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const TOOL_WINDOW = { title: 'storeTst64 (C:\\visualworks931\\image)', appClass: 'VisualLauncher' };
+
+  it('captures nothing while only VW tool windows exist, then warns if no app window ever appears', async () => {
+    vi.stubEnv('VW_VIDEO', '1');
+    vi.stubEnv('VW_VIDEO_FPS', '10');
+    const vw = makeVw({
+      listWindows: vi.fn(async () => [TOOL_WINDOW]),
+      getActionLog: vi.fn(() => []),
+    });
+
+    const recorder = startVideoRecording(vw)!;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(recorder.frameCount).toBe(0);
+    expect(vw.render).not.toHaveBeenCalled();
+
+    const recording = await recorder.stop();
+    // Last resort at stop: evidence exists, but the warning is explicit.
+    expect(recording.frameCount).toBeGreaterThanOrEqual(2);
+    expect(recording.warning).toContain('tool window');
+    expect(recording.warning).toContain('no application window');
+    expect(vw.render).toHaveBeenCalledWith(
+      expect.objectContaining({ windowTitle: TOOL_WINDOW.title })
+    );
+    await recording.discard();
+  });
+
+  it('falls back to a tool window during the run once the bounded wait expires', async () => {
+    vi.stubEnv('VW_VIDEO', '1');
+    vi.stubEnv('VW_VIDEO_FPS', '10');
+    const vw = makeVw({
+      listWindows: vi.fn(async () => [TOOL_WINDOW]),
+      getActionLog: vi.fn(() => []),
+    });
+
+    const recorder = startVideoRecording(vw, { targetWaitMs: 50 })!;
+    await waitForFrames(recorder, 2);
+    const recording = await recorder.stop();
+
+    expect(recording.warning).toContain('tool window');
+    expect(vw.render).toHaveBeenCalledWith(
+      expect.objectContaining({ windowTitle: TOOL_WINDOW.title })
+    );
+    await recording.discard();
+  });
+
+  it('never defers or filters an explicit override that names a VW tool window', async () => {
+    vi.stubEnv('VW_VIDEO', '1');
+    vi.stubEnv('VW_VIDEO_FPS', '10');
+    const vw = makeVw({
+      listWindows: vi.fn(async () => [TOOL_WINDOW]),
+      getActionLog: vi.fn(() => []),
+    });
+
+    const recorder = startVideoRecording(vw, { windowTitle: TOOL_WINDOW.title })!;
+    await waitForFrames(recorder, 2);
+    const recording = await recorder.stop();
+
+    expect(recording.warning).toBeUndefined();
+    expect(vw.render).toHaveBeenCalledWith(
+      expect.objectContaining({ windowTitle: TOOL_WINDOW.title })
+    );
+    await recording.discard();
+  });
+});
+
 describe('video assembly', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
-  it('builds encode args with even-dimension padding and h264', () => {
-    const args = buildVideoEncodeArgs('frame-%04d.png', 'out.mp4', 2);
+  it('builds concat/vfr encode args that preserve real frame durations', () => {
+    const args = buildVideoEncodeArgs('frames.txt', 'out.mp4');
     expect(args).toContain('libx264');
     expect(args).toContain('pad=ceil(iw/2)*2:ceil(ih/2)*2');
-    expect(args[args.indexOf('-framerate') + 1]).toBe('2.000');
+    expect(args).not.toContain('-framerate');
+    expect(args[args.indexOf('-f') + 1]).toBe('concat');
+    expect(args[args.indexOf('-fps_mode') + 1]).toBe('vfr');
+    expect(args[args.indexOf('-bf') + 1]).toBe('0');
+    expect(args[args.indexOf('-i') + 1]).toBe('frames.txt');
+    expect(args[args.length - 1]).toBe('out.mp4');
   });
+
+  it.skipIf(!FFMPEG_AVAILABLE)(
+    'matches assembled duration to the recorded wall clock and keeps every frame',
+    async () => {
+      const ffmpegPath = FFMPEG_PATH;
+      if (ffmpegPath === undefined) throw new Error('ffmpeg unavailable');
+
+      vi.stubEnv('VW_VIDEO', '1');
+      vi.stubEnv('VW_VIDEO_FPS', '10');
+      const vw = makeVw({
+        render: vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          return makeBgraFrame();
+        }),
+      });
+      const recorder = startVideoRecording(vw)!;
+      const startedAt = Date.now();
+      await waitForFrames(recorder, 3);
+      const stoppedAt = Date.now();
+      const recording = await recorder.stop();
+      const wallClockSeconds = (stoppedAt - startedAt) / 1000;
+
+      const keepDir = mkdtempSync(join(tmpdir(), 'vw-video-measure-'));
+      let videoPath: string | undefined;
+      const attach = vi.fn(async (name: string, options?: unknown) => {
+        if (name !== 'video.mp4') return;
+        videoPath = join(keepDir, 'video.mp4');
+        copyFileSync((options as { path: string }).path, videoPath);
+      });
+
+      await recording.attach({ attach } as unknown as AttachableTestInfo);
+      const capturedVideo = videoPath;
+      if (capturedVideo === undefined) throw new Error('video.mp4 was not attached');
+
+      const durationSeconds = probeDurationSeconds(ffmpegPath, capturedVideo);
+      const decodedFrames = probeDecodedFrameCount(ffmpegPath, capturedVideo);
+      rmSync(keepDir, { recursive: true, force: true });
+
+      // The concat list repeats the final file so its duration is consumed; that
+      // repeat is itself one extra image input, so ffmpeg decodes n + 1 frames.
+      // Nothing is dropped: every captured frame is present.
+      expect(decodedFrames).toBe(recording.frameCount + 1);
+      expect(Math.abs(durationSeconds - wallClockSeconds)).toBeLessThan(1);
+    }
+  );
 
   it.skipIf(!FFMPEG_AVAILABLE)('encodes an mp4 with a real ffmpeg binary and attaches it', async () => {
       vi.stubEnv('VW_VIDEO', '1');

@@ -8,22 +8,38 @@
  * source failed into black video when the desktop was locked or RDP dropped).
  *
  * TARGET RESOLUTION IS DYNAMIC. At bridge start the only live windows are VW
- * tool windows (Workspace / GemStone Launcher / VisualLauncher); the window a
+ * tool windows (VisualLauncher / GbxVisualLauncher / Workbook); the window a
  * test actually drives appears only once the test opens it. A target resolved
  * once at construction would therefore film a tool window, and a statically
  * configured VW_VIDEO_WINDOW naming the app window would 404 on every run
  * because the window does not exist yet. So the recorder re-resolves lazily:
  * it prefers the window named by the most recent interactive action in the
- * test's own action log (`vw.getActionLog()`), falls back to the failure-
- * screenshot window heuristic, and re-resolves whenever the current target
- * stops matching a live window (or no frame has been captured yet). An explicit
- * `windowTitle` / `appClass` (or VW_VIDEO_WINDOW / VW_VIDEO_APP_CLASS) is a
- * hard override and is never re-resolved.
+ * test's own action log (`vw.getActionLog()`), then the failure-screenshot
+ * window heuristic, and re-resolves whenever the current target stops matching
+ * a live window.
+ *
+ * TOOL WINDOWS ARE NEVER EVIDENCE. VW's own tool windows are not the app under
+ * test; filming them dominated the finished video (a 27.8 s recording whose MAS
+ * window appeared only in the last few frames, while the rest held a flat
+ * launcher). So the recorder DEFERS its first capture until a plausible
+ * application window exists, bounded by `VW_VIDEO_TARGET_WAIT_MS` (default
+ * 30_000, clamped to [0, 300_000]): before that bound a known tool window is
+ * never rendered. When an app window appears, the timeline simply starts there
+ * (the deferred period is represented by the recorder starting when the window
+ * appeared, never by launcher frames). At `stop()` — or once the bound expires —
+ * if NO app window was ever seen, the recorder films a tool window only as a
+ * last resort and reports a clear warning. An explicit `windowTitle` / `appClass`
+ * (or VW_VIDEO_WINDOW / VW_VIDEO_APP_CLASS) is a hard override: it is neither
+ * deferred nor filtered.
  *
  * Each /render frame is raw BGRA, re-encoded to PNG client-side (see png.ts).
- * Assembly runs once at test end via ffmpeg (VW_FFMPEG_PATH, system PATH, or the
- * optional ffmpeg-static dependency); when ffmpeg is missing or fails, the raw
- * frames are attached instead and the test result is never affected.
+ * Every frame is stamped with a wall-clock capture time, and assembly (see
+ * frameTimeline.ts) turns those into per-frame hold times fed to ffmpeg's concat
+ * demuxer, so the mp4's duration and each screen transition match the real test
+ * timeline rather than a nominal frame rate. Assembly runs once at test end via
+ * ffmpeg (VW_FFMPEG_PATH, system PATH, or the optional ffmpeg-static dependency);
+ * when ffmpeg is missing or fails, the raw frames are attached instead and the
+ * test result is never affected.
  *
  * The capture loop is a single unref'd interval with an in-flight guard: frame
  * I/O is async so the test's event loop is never blocked and a slow capture is
@@ -37,9 +53,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { ActionEvent, RenderOptions, VWTestClient, WindowSummary } from '@enviro365/vw-test-sdk-core';
 import { selectEvidenceWindow, type AttachableTestInfo } from './evidence.js';
+import { buildConcatFile, computeFrameDurations } from './frameTimeline.js';
+import { inspectFrame } from './frameGuard.js';
 import { encodeBgraToPng } from './png.js';
 
 const DEFAULT_FPS = 1;
@@ -49,9 +67,42 @@ const FRAME_CAPTURE_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 10_000;
 const FFMPEG_TIMEOUT_MS = 120_000;
 const MIN_FRAMES_FOR_VIDEO = 2;
+/** Assembly needs at least one frame; a single frame becomes a valid held still. */
+const MIN_FRAMES_TO_ASSEMBLE = 1;
 const MAX_FALLBACK_FRAMES = 60;
+const CONCAT_LIST_NAME = 'frames.txt';
 const NO_TARGET_MESSAGE = 'no VisualWorks window available to render';
 const TRUTHY_VALUES = new Set(['1', 'true', 'yes', 'on']);
+/**
+ * How long the recorder waits for an application window before it gives up and
+ * films a VW tool window as last-resort evidence. Deferring is preferred
+ * because the tool windows present at recorder start (VisualLauncher,
+ * GbxVisualLauncher, Workbook) are not the app the test drives. Bounded so an
+ * app-less test still yields evidence plus a clear warning, never silence.
+ */
+const DEFAULT_TARGET_WAIT_MS = 30_000;
+const MAX_TARGET_WAIT_MS = 300_000;
+
+/** appClass values of VW's own tool windows — never useful failure evidence. */
+const VW_TOOL_APP_CLASSES: ReadonlySet<string> = new Set([
+  'VisualLauncher',
+  'GbxVisualLauncher',
+  'Workbook',
+]);
+
+/**
+ * Title shapes of VW's own tool windows — belt-and-braces for the (unlikely)
+ * case the bridge omits `appClass`. Covers the launchers (storeTst64 /
+ * storedev64 / VisualWorks) and the two generic tool windows by exact title.
+ */
+const VW_TOOL_TITLE_PATTERN = /storeTst64|storedev64|VisualWorks|^(?:Workspace|GemStone Launcher)$/i;
+
+/** True when `window` is one of VW's own tool windows (never dynamically filmed). */
+function isVwToolWindow(window: WindowSummary): boolean {
+  const appClass = window['appClass'];
+  if (typeof appClass === 'string' && VW_TOOL_APP_CLASSES.has(appClass)) return true;
+  return VW_TOOL_TITLE_PATTERN.test(window.title);
+}
 
 export interface VideoRecordingOptions {
   /** Capture rate; default `VW_VIDEO_FPS` ?? 1, clamped to [0.1, 10]. */
@@ -66,6 +117,12 @@ export interface VideoRecordingOptions {
   windowTitle?: string;
   /** Explicit VW application class to disambiguate the target; default `VW_VIDEO_APP_CLASS`. */
   appClass?: string;
+  /**
+   * Max ms to defer the first capture while only VW tool windows exist; default
+   * `VW_VIDEO_TARGET_WAIT_MS` ?? 30_000, clamped to [0, 300_000]. Ignored when an
+   * explicit `windowTitle` / `appClass` override is configured.
+   */
+  targetWaitMs?: number;
 }
 
 /** The window POST /render targets (exactly one source is needed by the bridge). */
@@ -102,7 +159,13 @@ export function startVideoRecording(
 ): VideoRecorder | undefined {
   if (!TRUTHY_VALUES.has((process.env['VW_VIDEO'] ?? '').toLowerCase())) return undefined;
   try {
-    return new FrameRecorder(vw, resolveFps(opts.fps), opts.frameDir, resolveConfiguredWindow(opts));
+    return new FrameRecorder({
+      vw,
+      fps: resolveFps(opts.fps),
+      frameDir: opts.frameDir,
+      window: resolveConfiguredWindow(opts),
+      targetWaitMs: resolveTargetWaitMs(opts.targetWaitMs),
+    });
   } catch (error) {
     console.warn(`vw-test-sdk: video capture disabled — ${messageOf(error)}`);
     return undefined;
@@ -132,31 +195,67 @@ export interface FfmpegRunResult {
   reason?: string;
 }
 
-export function buildVideoEncodeArgs(inputPattern: string, outputPath: string, fps: number): string[] {
+export function buildVideoEncodeArgs(concatListPath: string, outputPath: string): string[] {
   return [
     '-y',
     '-hide_banner',
     '-loglevel',
     'error',
-    '-framerate',
-    fps.toFixed(3),
-    '-start_number',
-    '1',
+    // The concat list carries a real wall-clock duration per frame; image2's
+    // nominal `-framerate` cannot (it derives duration as count / rate).
+    '-f',
+    'concat',
+    '-safe',
+    '0',
     '-i',
-    inputPattern,
+    concatListPath,
+    // Preserve the per-frame durations instead of forcing a constant rate.
+    '-fps_mode',
+    'vfr',
     // yuv420p needs even dimensions; VW window/screen rects are not guaranteed even.
     '-vf',
     'pad=ceil(iw/2)*2:ceil(ih/2)*2',
     '-c:v',
     'libx264',
+    // B-frames make the mov muxer under-report duration (the last frames decode
+    // before an edit list adjusts the start; measured 7.04s for a 9.0s timeline).
+    // Disabling them keeps the container Duration equal to the frame timeline.
+    '-bf',
+    '0',
     '-preset',
-    'veryfast',
+    'slow',
+    // Evidence is slideshow-like (few sharp frames held for seconds), which is exactly
+    // what `stillimage` tunes for. CRF 18 is visually near-lossless; the default 23
+    // visibly blurs text in screenshots. yuv420p is kept so the result stays playable
+    // in browsers (yuv444p/high444 is not), and the colour tags below stop a player
+    // guessing the range/matrix, which is the usual cause of washed-out output.
+    '-tune',
+    'stillimage',
+    '-crf',
+    '18',
     '-pix_fmt',
     'yuv420p',
+    '-color_range',
+    'tv',
+    '-colorspace',
+    'bt709',
+    '-color_primaries',
+    'bt709',
+    '-color_trc',
+    'iec61966-2-1',
     '-movflags',
     '+faststart',
     outputPath,
   ];
+}
+
+/** Construction inputs for {@link FrameRecorder} (kept as one object: >3 fields). */
+interface FrameRecorderConfig {
+  vw: VWTestClient;
+  fps: number;
+  frameDir: string | undefined;
+  window: RenderWindow | undefined;
+  targetWaitMs: number;
 }
 
 class FrameRecorder implements VideoRecorder, RecordedVideo {
@@ -164,6 +263,8 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   readonly frameDir: string;
   private readonly vw: VWTestClient;
   private readonly configuredWindow: RenderWindow | undefined;
+  private readonly targetWaitMs: number;
+  private readonly startedAt: number;
   private readonly paths: string[] = [];
   private readonly times: number[] = [];
   private resolvedWindow: RenderWindow | undefined;
@@ -172,15 +273,24 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   private captureError: string | undefined;
   private warningValue: string | undefined;
   private stopPromise: Promise<RecordedVideo> | null = null;
+  private stoppedAt: number | undefined;
   private discarded = false;
+  /** True once a non-tool (application) window has been resolved and filmed. */
+  private appWindowSeen = false;
+  /** True once `stop()` has been requested — removes the deferral bound. */
+  private stopRequested = false;
+  /** Title of the VW tool window filmed as a last resort, when that happened. */
+  private toolFallbackTitle: string | undefined;
 
-  constructor(vw: VWTestClient, fps: number, frameDir?: string, window?: RenderWindow) {
-    this.vw = vw;
-    this.fps = fps;
-    this.frameDir = frameDir ?? join(tmpdir(), `vw-test-sdk-video-${process.pid}-${Date.now()}`);
-    this.configuredWindow = window;
+  constructor(config: FrameRecorderConfig) {
+    this.vw = config.vw;
+    this.fps = config.fps;
+    this.frameDir = config.frameDir ?? join(tmpdir(), `vw-test-sdk-video-${process.pid}-${Date.now()}`);
+    this.configuredWindow = config.window;
+    this.targetWaitMs = config.targetWaitMs;
+    this.startedAt = Date.now();
     mkdirSync(this.frameDir, { recursive: true });
-    this.timer = setInterval(() => void this.captureFrame(), Math.round(1000 / fps));
+    this.timer = setInterval(() => void this.captureFrame(), Math.round(1000 / this.fps));
     this.timer.unref();
     void this.captureFrame();
   }
@@ -203,6 +313,10 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   }
 
   private async finish(): Promise<RecordedVideo> {
+    this.stopRequested = true;
+    // Stamp the stop before waiting: the final frame is held until the recording
+    // actually stopped, not until assembly runs.
+    this.stoppedAt ??= Date.now();
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -235,10 +349,19 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
       }
       return `no frames captured; last capture error: ${this.captureError}`;
     }
-    if (this.captureError !== undefined) {
-      return `frame capture error: ${this.captureError}`;
+    const notes: string[] = [];
+    if (this.toolFallbackTitle !== undefined) {
+      notes.push(
+        `filmed VW tool window "${this.toolFallbackTitle}" because no application window appeared — the video is launcher-only, not the app under test`
+      );
     }
-    return undefined;
+    if (!this.appWindowSeen && this.configuredWindow === undefined) {
+      notes.push('no application window was ever seen');
+    }
+    if (this.captureError !== undefined) {
+      notes.push(`frame capture error: ${this.captureError}`);
+    }
+    return notes.length > 0 ? notes.join('; ') : undefined;
   }
 
   /**
@@ -272,13 +395,20 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
     const run = (async (): Promise<void> => {
       try {
         const window = await this.resolveRenderWindow();
+        // Sampled before the request: that is the moment the bridge renders the
+        // screen state this frame shows, and it anchors the frame's hold time.
+        const sampledAt = Date.now();
         const frame = await this.vw.render(renderOptionsFor(window, timeoutMs));
+        const guard = inspectFrame(frame.bytes, frame.width, frame.height);
+        if (!guard.clean) {
+          this.captureError = `frame refused by content guard: ${guard.reason ?? 'unknown'}`;
+          return;
+        }
         const png = encodeBgraToPng(frame.bytes, frame.width, frame.height);
-        const capturedAt = Date.now();
         const path = join(this.frameDir, `frame-${String(this.paths.length + 1).padStart(4, '0')}.png`);
         await fs.writeFile(path, png);
         this.paths.push(path);
-        this.times.push(capturedAt);
+        this.times.push(sampledAt);
         this.captureError = undefined;
       } catch (error) {
         this.captureError = messageOf(error);
@@ -295,36 +425,73 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   /**
    * Resolve POST /render's window target dynamically.
    *
-   * An explicit configured window is a hard override and is returned as-is.
-   * Otherwise the target is derived from the test's own action log: the window
-   * named by the most recent interactive action wins, because that is the window
-   * the test is actually driving. When the action log names nothing usable yet
-   * (the app window has not been opened), fall back to the failure-screenshot
-   * heuristic. The resolved target is cached, but re-resolved whenever the
-   * preferred window changes or the cached target is no longer live — so a window
-   * that appears AFTER the recorder starts is picked up on the next tick.
+   * An explicit configured window is a hard override and is returned as-is —
+   * never deferred and never filtered. Otherwise the target is the application
+   * window the test is driving: the live window named by the most recent
+   * interactive action in the test's own action log when it is not a VW tool
+   * window, else the failure-screenshot heuristic if that names a non-tool
+   * window, else the first non-tool window. VW tool windows are NEVER selected
+   * dynamically while no application window has been seen: the recorder throws
+   * `NO_TARGET_MESSAGE` (captures nothing) so the deferral period leaves no
+   * launcher frames in the timeline. The resolved target is cached and reused
+   * while live, but re-resolved when the preferred application window changes —
+   * so a window that appears AFTER the recorder starts is picked up on the next
+   * tick. As a bounded last resort (see {@link toolFallbackAllowed}) a tool
+   * window is filmed, and that fact is surfaced in the recording's warning.
    */
   private async resolveRenderWindow(): Promise<RenderWindow> {
     if (this.configuredWindow !== undefined) return this.configuredWindow;
 
     const windows = await this.vw.listWindows();
-    const preferred = this.selectDynamicWindow(windows);
-    if (preferred === undefined) {
-      if (this.resolvedWindow !== undefined && this.isStillLive(this.resolvedWindow, windows)) {
+
+    if (this.resolvedWindow !== undefined && this.isStillLive(this.resolvedWindow, windows)) {
+      const preferred = this.selectApplicationWindow(windows);
+      if (preferred === undefined || this.matches(this.resolvedWindow, preferred)) {
         return this.resolvedWindow;
       }
-      throw new Error(NO_TARGET_MESSAGE);
     }
 
-    if (this.resolvedWindow !== undefined && this.matches(this.resolvedWindow, preferred)) {
-      return this.resolvedWindow;
+    const preferred = this.selectApplicationWindow(windows);
+    if (preferred !== undefined) {
+      this.appWindowSeen = true;
+      return this.rememberTarget(preferred);
     }
 
-    const window: RenderWindow = { windowTitle: preferred.title };
-    const appClass = preferred['appClass'];
-    if (typeof appClass === 'string' && appClass.length > 0) window.appClass = appClass;
-    this.resolvedWindow = window;
-    return window;
+    if (!this.appWindowSeen && this.toolFallbackAllowed()) {
+      const fallback = selectEvidenceWindow([...windows]) ?? windows[0];
+      if (fallback !== undefined) {
+        this.toolFallbackTitle ??= fallback.title;
+        return this.rememberTarget(fallback);
+      }
+    }
+
+    throw new Error(NO_TARGET_MESSAGE);
+  }
+
+  /** A tool window may be filmed only after the bounded wait, or once stopping. */
+  private toolFallbackAllowed(): boolean {
+    return this.stopRequested || Date.now() - this.startedAt >= this.targetWaitMs;
+  }
+
+  private rememberTarget(window: WindowSummary): RenderWindow {
+    const target: RenderWindow = { windowTitle: window.title };
+    const appClass = window['appClass'];
+    if (typeof appClass === 'string' && appClass.length > 0) target.appClass = appClass;
+    this.resolvedWindow = target;
+    return target;
+  }
+
+  /**
+   * The application window to film: action-log window first (when not a tool
+   * window), then the failure-screenshot heuristic, then any non-tool window.
+   * Returns undefined when only VW tool windows are live.
+   */
+  private selectApplicationWindow(windows: readonly WindowSummary[]): WindowSummary | undefined {
+    const fromLog = this.windowFromActionLog(windows);
+    if (fromLog !== undefined && !isVwToolWindow(fromLog)) return fromLog;
+    const heuristic = selectEvidenceWindow([...windows]);
+    if (heuristic !== undefined && !isVwToolWindow(heuristic)) return heuristic;
+    return windows.find((window) => !isVwToolWindow(window));
   }
 
   /** True when the cached target still matches exactly one live window. */
@@ -336,16 +503,6 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
     if (target.windowTitle !== undefined && !window.title.includes(target.windowTitle)) return false;
     if (target.appClass !== undefined && window['appClass'] !== target.appClass) return false;
     return true;
-  }
-
-  /**
-   * Pick the window the test is driving: the most recent interactive action's
-   * window when it is still live, else the failure-screenshot heuristic.
-   */
-  private selectDynamicWindow(windows: readonly WindowSummary[]): WindowSummary | undefined {
-    const fromLog = this.windowFromActionLog(windows);
-    if (fromLog !== undefined) return fromLog;
-    return selectEvidenceWindow([...windows]);
   }
 
   /**
@@ -389,19 +546,18 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   }
 
   private async attachVideoOrExplain(testInfo: AttachableTestInfo): Promise<string | undefined> {
-    if (this.paths.length < MIN_FRAMES_FOR_VIDEO) {
+    if (this.paths.length < MIN_FRAMES_TO_ASSEMBLE) {
       const cause = this.captureError === undefined ? '' : `; last capture error: ${this.captureError}`;
-      return `only ${this.paths.length} frame(s) captured; video needs at least ${MIN_FRAMES_FOR_VIDEO}${cause}`;
+      return `no frames captured${cause}`;
     }
     const ffmpegPath = await resolveFfmpegPath();
     if (ffmpegPath === undefined) {
       return 'ffmpeg not found — install ffmpeg, set VW_FFMPEG_PATH, or add the optional ffmpeg-static dependency';
     }
     const outputPath = join(this.frameDir, 'video.mp4');
-    const result = await runFfmpeg(
-      ffmpegPath,
-      buildVideoEncodeArgs(join(this.frameDir, 'frame-%04d.png'), outputPath, this.effectiveFps())
-    );
+    const listPath = join(this.frameDir, CONCAT_LIST_NAME);
+    await fs.writeFile(listPath, this.buildConcatList(), 'utf-8');
+    const result = await runFfmpeg(ffmpegPath, buildVideoEncodeArgs(listPath, outputPath));
     if (!result.ok) return `ffmpeg assembly failed: ${result.reason ?? 'unknown error'}`;
     if (!existsSync(outputPath) || statSync(outputPath).size === 0) {
       return 'ffmpeg produced no output file';
@@ -409,6 +565,19 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
     await testInfo.attach('video.mp4', { path: outputPath, contentType: 'video/mp4' });
     console.log(`vw-test-sdk: video attached (${this.paths.length} frame(s) @ ${this.effectiveFps().toFixed(2)} fps)`);
     return undefined;
+  }
+
+  /**
+   * The concat list that gives every frame its real wall-clock hold time. Frame
+   * paths are bare file names: the list is written into the frame directory and
+   * the concat demuxer resolves relative names against the list's own directory.
+   */
+  private buildConcatList(): string {
+    const durations = computeFrameDurations(this.times, this.stoppedAt ?? Date.now());
+    return buildConcatFile(
+      this.paths.map((path) => basename(path)),
+      durations
+    );
   }
 
   private async attachFrames(testInfo: AttachableTestInfo, reason: string): Promise<void> {
@@ -453,6 +622,12 @@ function resolveFps(override: number | undefined): number {
   const raw = override ?? Number.parseFloat(process.env['VW_VIDEO_FPS'] ?? '');
   const fps = Number.isFinite(raw) ? raw : DEFAULT_FPS;
   return Math.min(MAX_FPS, Math.max(MIN_FPS, fps));
+}
+
+function resolveTargetWaitMs(override: number | undefined): number {
+  const raw = override ?? Number.parseFloat(process.env['VW_VIDEO_TARGET_WAIT_MS'] ?? '');
+  const ms = Number.isFinite(raw) ? raw : DEFAULT_TARGET_WAIT_MS;
+  return Math.min(MAX_TARGET_WAIT_MS, Math.max(0, ms));
 }
 
 /** Action kinds that represent the test driving a window (not evidence capture). */
