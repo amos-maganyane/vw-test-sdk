@@ -12,7 +12,7 @@ import { test as base } from '@playwright/test';
 import type { VWTestClient } from '@enviro365/vw-test-sdk-core';
 import { createClientFromEnv } from './clientFromEnv.js';
 import { captureFailureBundle } from './evidence.js';
-import { startVideoRecording } from './video.js';
+import { resolveVideoRetainPolicy, shouldRetainVideo, startVideoRecording } from './video.js';
 
 export interface VWFixtures {
   /** A per-test VWTestClient built from env configuration. */
@@ -34,8 +34,13 @@ export const test = base.extend<VWFixtures>({
         await use();
       } finally {
         const recording = await recorder?.stop();
-        if (testInfo.status !== testInfo.expectedStatus) {
-          await captureFailureBundle(vw, testInfo, recording);
+        const failed = testInfo.status !== testInfo.expectedStatus;
+        if (shouldRetainVideo(testInfo.status, testInfo.expectedStatus, resolveVideoRetainPolicy())) {
+          if (failed) {
+            await captureFailureBundle(vw, testInfo, recording);
+          } else {
+            await recording?.attach(testInfo);
+          }
         } else {
           await recording?.discard();
         }

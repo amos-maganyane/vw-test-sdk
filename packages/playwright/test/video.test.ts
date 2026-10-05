@@ -7,6 +7,10 @@ import {
   startVideoRecording,
   resolveFfmpegPath,
   buildVideoEncodeArgs,
+  resolveEncodeOptions,
+  resolveVideoRetainPolicy,
+  resolveVideoSource,
+  shouldRetainVideo,
   type VideoRecorder,
   type RecordedVideo,
 } from '../src/video.js';
@@ -87,6 +91,7 @@ describe('startVideoRecording', () => {
     expect(vw.render).toHaveBeenCalledWith({
       timeoutMs: 15_000,
       recordAction: false,
+      source: 'os',
       windowTitle: WINDOW.title,
       appClass: WINDOW.appClass,
     });
@@ -98,6 +103,19 @@ describe('startVideoRecording', () => {
 
     await recording.discard();
     expect(existsSync(dirname(recording.framePaths[0]))).toBe(false);
+  });
+
+  it('captures with the colour-correct os source, or in-image when VW_VIDEO_SOURCE opts in', async () => {
+    vi.stubEnv('VW_VIDEO', '1');
+    vi.stubEnv('VW_VIDEO_FPS', '10');
+    vi.stubEnv('VW_VIDEO_SOURCE', 'in-image');
+    const vw = makeVw();
+    const recorder = startVideoRecording(vw)!;
+    await waitForFrames(recorder, 1);
+    const recording = await recorder.stop();
+
+    expect(vw.render).toHaveBeenCalledWith(expect.objectContaining({ source: 'in-image' }));
+    await recording.discard();
   });
 
   it('tops up to the video minimum when a short test stops before frame 1 resolves', async () => {
@@ -470,6 +488,40 @@ describe('video assembly', () => {
     expect(args[args.length - 1]).toBe('out.mp4');
   });
 
+  it('defaults to CRF 18 and preset slow with the even-padding filter and no thread cap', () => {
+    const args = buildVideoEncodeArgs('frames.txt', 'out.mp4');
+    expect(args[args.indexOf('-crf') + 1]).toBe('18');
+    expect(args[args.indexOf('-preset') + 1]).toBe('slow');
+    expect(args[args.indexOf('-vf') + 1]).toBe('pad=ceil(iw/2)*2:ceil(ih/2)*2');
+    expect(args[args.indexOf('-vf') + 1]).not.toContain('scale=');
+    expect(args).not.toContain('-threads');
+  });
+
+  it('applies CRF, preset and thread overrides', () => {
+    const args = buildVideoEncodeArgs('frames.txt', 'out.mp4', {
+      crf: 20,
+      preset: 'medium',
+      threads: 4,
+    });
+    expect(args[args.indexOf('-crf') + 1]).toBe('20');
+    expect(args[args.indexOf('-preset') + 1]).toBe('medium');
+    expect(args[args.indexOf('-threads') + 1]).toBe('4');
+  });
+
+  it('downscales to the configured max size without upscaling', () => {
+    const args = buildVideoEncodeArgs('frames.txt', 'out.mp4', { maxWidth: 800, maxHeight: 800 });
+    const filter = args[args.indexOf('-vf') + 1];
+    expect(filter).toContain(
+      "scale='min(iw,800)':'min(ih,800)':force_original_aspect_ratio=decrease"
+    );
+    expect(filter).toContain('pad=ceil(iw/2)*2:ceil(ih/2)*2');
+  });
+
+  it('ignores a partial max-size cap so the filter stays the even-padding filter', () => {
+    const args = buildVideoEncodeArgs('frames.txt', 'out.mp4', { maxWidth: 800 });
+    expect(args[args.indexOf('-vf') + 1]).toBe('pad=ceil(iw/2)*2:ceil(ih/2)*2');
+  });
+
   it.skipIf(!FFMPEG_AVAILABLE)(
     'matches assembled duration to the recorded wall clock and keeps every frame',
     async () => {
@@ -537,6 +589,86 @@ describe('video assembly', () => {
       expect(checks).toHaveLength(1);
       expect(checks[0].exists).toBe(true);
       expect(checks[0].size).toBeGreaterThan(0);
+  });
+});
+
+describe('video encode options', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to CRF 18 and preset slow when no VW_VIDEO_* overrides are set', () => {
+    expect(resolveEncodeOptions()).toEqual({ crf: 18, preset: 'slow' });
+  });
+
+  it('maps VW_VIDEO_CRF, VW_VIDEO_PRESET, VW_VIDEO_THREADS and VW_VIDEO_MAX_SIZE', () => {
+    vi.stubEnv('VW_VIDEO_CRF', '23');
+    vi.stubEnv('VW_VIDEO_PRESET', 'veryfast');
+    vi.stubEnv('VW_VIDEO_THREADS', '2');
+    vi.stubEnv('VW_VIDEO_MAX_SIZE', '800x600');
+    expect(resolveEncodeOptions()).toEqual({
+      crf: 23,
+      preset: 'veryfast',
+      threads: 2,
+      maxWidth: 800,
+      maxHeight: 600,
+    });
+  });
+
+  it('ignores invalid CRF, preset, thread and max-size values without throwing', () => {
+    vi.stubEnv('VW_VIDEO_CRF', '999');
+    vi.stubEnv('VW_VIDEO_PRESET', 'turbo');
+    vi.stubEnv('VW_VIDEO_THREADS', '0');
+    vi.stubEnv('VW_VIDEO_MAX_SIZE', 'garbage');
+    expect(resolveEncodeOptions()).toEqual({ crf: 18, preset: 'slow' });
+  });
+});
+
+describe('video retention policy', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('defaults to on-failure when VW_VIDEO_RETAIN is unset', () => {
+    delete process.env['VW_VIDEO_RETAIN'];
+    expect(resolveVideoRetainPolicy()).toBe('on-failure');
+  });
+
+  it('reads VW_VIDEO_RETAIN=always', () => {
+    vi.stubEnv('VW_VIDEO_RETAIN', 'always');
+    expect(resolveVideoRetainPolicy()).toBe('always');
+  });
+
+  it('treats an unknown VW_VIDEO_RETAIN as on-failure', () => {
+    vi.stubEnv('VW_VIDEO_RETAIN', 'sometimes');
+    expect(resolveVideoRetainPolicy()).toBe('on-failure');
+  });
+
+  it('retains a genuine failure under on-failure but not a plain pass', () => {
+    expect(shouldRetainVideo('failed', 'passed', 'on-failure')).toBe(true);
+    expect(shouldRetainVideo('passed', 'passed', 'on-failure')).toBe(false);
+    expect(shouldRetainVideo('passed', 'failed', 'on-failure')).toBe(true);
+  });
+
+  it('retains every result under always', () => {
+    expect(shouldRetainVideo('passed', 'passed', 'always')).toBe(true);
+    expect(shouldRetainVideo('failed', 'passed', 'always')).toBe(true);
+  });
+});
+
+describe('video render source', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('defaults to os and only accepts in-image as the opt-in', () => {
+    delete process.env['VW_VIDEO_SOURCE'];
+    expect(resolveVideoSource()).toBe('os');
+    vi.stubEnv('VW_VIDEO_SOURCE', 'in-image');
+    expect(resolveVideoSource()).toBe('in-image');
+    vi.stubEnv('VW_VIDEO_SOURCE', 'banana');
+    expect(resolveVideoSource()).toBe('os');
   });
 });
 

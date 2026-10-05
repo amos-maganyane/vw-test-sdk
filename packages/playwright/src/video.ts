@@ -54,7 +54,13 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import type { ActionEvent, RenderOptions, VWTestClient, WindowSummary } from '@enviro365/vw-test-sdk-core';
+import type {
+  ActionEvent,
+  RenderOptions,
+  RenderSource,
+  VWTestClient,
+  WindowSummary,
+} from '@enviro365/vw-test-sdk-core';
 import { selectEvidenceWindow, type AttachableTestInfo } from './evidence.js';
 import { buildConcatFile, computeFrameDurations } from './frameTimeline.js';
 import { inspectFrame } from './frameGuard.js';
@@ -82,6 +88,24 @@ const TRUTHY_VALUES = new Set(['1', 'true', 'yes', 'on']);
  */
 const DEFAULT_TARGET_WAIT_MS = 30_000;
 const MAX_TARGET_WAIT_MS = 300_000;
+
+/** x264 quality/speed defaults for the evidence encode (overridable via VW_VIDEO_*). */
+const DEFAULT_CRF = 18;
+const MIN_CRF = 0;
+const MAX_CRF = 51;
+const DEFAULT_PRESET = 'slow';
+/** The x264 presets ffmpeg accepts for `-preset`; any other value is ignored. */
+const VALID_X264_PRESETS: ReadonlySet<string> = new Set([
+  'ultrafast',
+  'superfast',
+  'veryfast',
+  'faster',
+  'fast',
+  'medium',
+  'slow',
+  'slower',
+  'veryslow',
+]);
 
 /** appClass values of VW's own tool windows — never useful failure evidence. */
 const VW_TOOL_APP_CLASSES: ReadonlySet<string> = new Set([
@@ -172,6 +196,7 @@ export function startVideoRecording(
       window: resolveConfiguredWindow(opts),
       targetWaitMs: resolveTargetWaitMs(opts.targetWaitMs),
       highlight: resolveHighlightEnabled(opts),
+      source: resolveVideoSource(),
     });
   } catch (error) {
     console.warn(`vw-test-sdk: video capture disabled — ${messageOf(error)}`);
@@ -202,8 +227,51 @@ export interface FfmpegRunResult {
   reason?: string;
 }
 
-export function buildVideoEncodeArgs(concatListPath: string, outputPath: string): string[] {
-  return [
+/**
+ * Optional H.264/x264 encode knobs for {@link buildVideoEncodeArgs}. Every field
+ * is optional; omitted fields keep the module defaults (CRF 18, preset `slow`,
+ * no thread cap, no size cap).
+ */
+export interface VideoEncodeOptions {
+  /** x264 constant rate factor, integer 0..51; default 18. */
+  crf?: number;
+  /** x264 preset (speed/size trade-off), one of {@link VALID_X264_PRESETS}; default `slow`. */
+  preset?: string;
+  /** Encoder threads, positive integer; omitted => ffmpeg picks automatically. */
+  threads?: number;
+  /** Output width cap; applied only when BOTH maxWidth and maxHeight are set. */
+  maxWidth?: number;
+  /** Output height cap; applied only when BOTH maxWidth and maxHeight are set. */
+  maxHeight?: number;
+}
+
+/**
+ * The video filter: the even-padding filter alone, or — when both cap
+ * dimensions are set — a downscale-to-fit in front of it. `min()` never
+ * upscales. The single quotes around each expression are literal characters
+ * (args go to `spawn` with no shell): they protect the commas inside `min()`
+ * from ffmpeg's filter-chain parser.
+ */
+function buildVideoFilter(options: VideoEncodeOptions): string {
+  const pad = 'pad=ceil(iw/2)*2:ceil(ih/2)*2';
+  if (options.maxWidth === undefined || options.maxHeight === undefined) return pad;
+  return `scale='min(iw,${options.maxWidth})':'min(ih,${options.maxHeight})':force_original_aspect_ratio=decrease,${pad}`;
+}
+
+/**
+ * The ffmpeg argument vector for the concat/VFR assembly. `options` tunes the
+ * x264 encode (CRF, preset, threads) and an optional downscale-to-fit cap;
+ * omitted options keep the defaults. The returned vector is passed to `spawn`
+ * with no shell, so the filter's literal quotes survive intact.
+ */
+export function buildVideoEncodeArgs(
+  concatListPath: string,
+  outputPath: string,
+  options: VideoEncodeOptions = {}
+): string[] {
+  const crf = options.crf ?? DEFAULT_CRF;
+  const preset = options.preset ?? DEFAULT_PRESET;
+  const args = [
     '-y',
     '-hide_banner',
     '-loglevel',
@@ -221,7 +289,7 @@ export function buildVideoEncodeArgs(concatListPath: string, outputPath: string)
     'vfr',
     // yuv420p needs even dimensions; VW window/screen rects are not guaranteed even.
     '-vf',
-    'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+    buildVideoFilter(options),
     '-c:v',
     'libx264',
     // B-frames make the mov muxer under-report duration (the last frames decode
@@ -230,16 +298,19 @@ export function buildVideoEncodeArgs(concatListPath: string, outputPath: string)
     '-bf',
     '0',
     '-preset',
-    'slow',
+    preset,
     // Evidence is slideshow-like (few sharp frames held for seconds), which is exactly
-    // what `stillimage` tunes for. CRF 18 is visually near-lossless; the default 23
-    // visibly blurs text in screenshots. yuv420p is kept so the result stays playable
-    // in browsers (yuv444p/high444 is not), and the colour tags below stop a player
-    // guessing the range/matrix, which is the usual cause of washed-out output.
+    // what `stillimage` tunes for. The default CRF (18) is visually near-lossless;
+    // x264's own default 23 visibly blurs text in screenshots. yuv420p is kept so the
+    // result stays playable in browsers (yuv444p/high444 is not), and the colour tags
+    // below stop a player guessing the range/matrix, the usual cause of washed-out output.
     '-tune',
     'stillimage',
     '-crf',
-    '18',
+    String(crf),
+  ];
+  if (options.threads !== undefined) args.push('-threads', String(options.threads));
+  args.push(
     '-pix_fmt',
     'yuv420p',
     '-color_range',
@@ -252,8 +323,9 @@ export function buildVideoEncodeArgs(concatListPath: string, outputPath: string)
     'iec61966-2-1',
     '-movflags',
     '+faststart',
-    outputPath,
-  ];
+    outputPath
+  );
+  return args;
 }
 
 /** Construction inputs for {@link FrameRecorder} (kept as one object: >3 fields). */
@@ -264,6 +336,7 @@ interface FrameRecorderConfig {
   window: RenderWindow | undefined;
   targetWaitMs: number;
   highlight: boolean;
+  source: RenderSource;
 }
 
 class FrameRecorder implements VideoRecorder, RecordedVideo {
@@ -273,6 +346,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   private readonly configuredWindow: RenderWindow | undefined;
   private readonly targetWaitMs: number;
   private readonly highlightEnabled: boolean;
+  private readonly renderSource: RenderSource;
   private readonly startedAt: number;
   private readonly paths: string[] = [];
   private readonly times: number[] = [];
@@ -298,6 +372,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
     this.configuredWindow = config.window;
     this.targetWaitMs = config.targetWaitMs;
     this.highlightEnabled = config.highlight;
+    this.renderSource = config.source;
     this.startedAt = Date.now();
     mkdirSync(this.frameDir, { recursive: true });
     this.timer = setInterval(() => void this.captureFrame(), Math.round(1000 / this.fps));
@@ -409,12 +484,24 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
         // screen state this frame shows, and it anchors the frame's hold time.
         const sampledAt = Date.now();
         const frame = await this.vw.render(
-          renderOptionsFor(window, timeoutMs, this.highlightEnabled)
+          renderOptionsFor(window, {
+            timeoutMs,
+            highlight: this.highlightEnabled,
+            source: this.renderSource,
+          })
         );
         const guard = inspectFrame(frame.bytes, frame.width, frame.height);
         if (!guard.clean) {
-          this.captureError = `frame refused by content guard: ${guard.reason ?? 'unknown'}`;
-          return;
+          // Strict (default) refuses an unproven frame. VW_VIDEO_GUARD=warn keeps it
+          // and says so, because a dark-themed window could otherwise trip the
+          // heuristic and silently discard evidence.
+          if ((process.env['VW_VIDEO_GUARD'] ?? 'strict') !== 'warn') {
+            this.captureError = `frame refused by content guard: ${guard.reason ?? 'unknown'}`;
+            return;
+          }
+          console.warn(
+            `vw-test-sdk: frame kept despite content guard: ${guard.reason ?? 'unknown'} (VW_VIDEO_GUARD=warn)`
+          );
         }
         const png = encodeBgraToPng(frame.bytes, frame.width, frame.height);
         const path = join(this.frameDir, `frame-${String(this.paths.length + 1).padStart(4, '0')}.png`);
@@ -569,7 +656,10 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
     const outputPath = join(this.frameDir, 'video.mp4');
     const listPath = join(this.frameDir, CONCAT_LIST_NAME);
     await fs.writeFile(listPath, this.buildConcatList(), 'utf-8');
-    const result = await runFfmpeg(ffmpegPath, buildVideoEncodeArgs(listPath, outputPath));
+    const result = await runFfmpeg(
+      ffmpegPath,
+      buildVideoEncodeArgs(listPath, outputPath, resolveEncodeOptions())
+    );
     if (!result.ok) return `ffmpeg assembly failed: ${result.reason ?? 'unknown error'}`;
     if (!existsSync(outputPath) || statSync(outputPath).size === 0) {
       return 'ffmpeg produced no output file';
@@ -642,6 +732,46 @@ function resolveTargetWaitMs(override: number | undefined): number {
   return Math.min(MAX_TARGET_WAIT_MS, Math.max(0, ms));
 }
 
+/**
+ * Encode options from the environment. `VW_VIDEO_CRF` (integer 0..51),
+ * `VW_VIDEO_PRESET` (a valid x264 preset), `VW_VIDEO_THREADS` (positive
+ * integer) and `VW_VIDEO_MAX_SIZE` (`WxH`, both sides positive — otherwise the
+ * cap is ignored entirely). Every invalid value is ignored: the default stands
+ * and nothing throws.
+ */
+export function resolveEncodeOptions(): VideoEncodeOptions {
+  const options: VideoEncodeOptions = { crf: DEFAULT_CRF, preset: DEFAULT_PRESET };
+  const crf = resolveIntegerEnv('VW_VIDEO_CRF');
+  if (crf !== undefined && crf >= MIN_CRF && crf <= MAX_CRF) options.crf = crf;
+  const preset = nonEmptyEnv('VW_VIDEO_PRESET');
+  if (preset !== undefined && VALID_X264_PRESETS.has(preset)) options.preset = preset;
+  const threads = resolveIntegerEnv('VW_VIDEO_THREADS');
+  if (threads !== undefined && threads > 0) options.threads = threads;
+  const maxSize = parseMaxSize(nonEmptyEnv('VW_VIDEO_MAX_SIZE'));
+  if (maxSize !== undefined) {
+    options.maxWidth = maxSize.width;
+    options.maxHeight = maxSize.height;
+  }
+  return options;
+}
+
+/** Strict integer env value: digits only and non-empty, else undefined. */
+function resolveIntegerEnv(name: string): number | undefined {
+  const value = nonEmptyEnv(name);
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  return Number(value);
+}
+
+/** Parse `WxH` into positive dimensions; anything else — or either side 0 — is undefined. */
+function parseMaxSize(value: string | undefined): { width: number; height: number } | undefined {
+  if (value === undefined) return undefined;
+  const match = /^(\d+)x(\d+)$/i.exec(value);
+  if (match === null) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
 /** Action kinds that represent the test driving a window (not evidence capture). */
 const INTERACTIVE_ACTION_KINDS = new Set([
   'click',
@@ -688,17 +818,67 @@ function nonEmptyEnv(name: string): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
 }
 
-function renderOptionsFor(window: RenderWindow, timeoutMs: number, highlight: boolean): RenderOptions {
-  const opts: RenderOptions = { timeoutMs, recordAction: false };
+/** Per-frame request knobs (grouped: >3 fields, mirrors FrameRecorderConfig). */
+interface RenderCaptureSettings {
+  timeoutMs: number;
+  highlight: boolean;
+  source: RenderSource;
+}
+
+function renderOptionsFor(window: RenderWindow, capture: RenderCaptureSettings): RenderOptions {
+  const opts: RenderOptions = {
+    timeoutMs: capture.timeoutMs,
+    recordAction: false,
+    source: capture.source,
+  };
   if (window.windowTitle !== undefined) opts.windowTitle = window.windowTitle;
   if (window.appClass !== undefined) opts.appClass = window.appClass;
-  if (highlight) opts.highlight = true;
+  if (capture.highlight) opts.highlight = true;
   return opts;
 }
 
 function resolveHighlightEnabled(opts: VideoRecordingOptions): boolean {
   if (opts.highlight !== undefined) return opts.highlight;
   return TRUTHY_VALUES.has((process.env['VW_HIGHLIGHT'] ?? '').toLowerCase());
+}
+
+/**
+ * Resolve the render capture source from `VW_VIDEO_SOURCE`. `in-image` opts
+ * back into the offscreen Pixmap render; anything else (including unset) uses
+ * the colour-correct OS capture.
+ */
+export function resolveVideoSource(): RenderSource {
+  const raw = (process.env['VW_VIDEO_SOURCE'] ?? '').trim().toLowerCase();
+  return raw === 'in-image' ? 'in-image' : 'os';
+}
+
+/**
+ * When a recording is kept. `on-failure` (default) attaches evidence only for a
+ * non-passing test; `always` also attaches it for a passing test, which is what
+ * audit/training evidence needs. Mirrors Playwright's `video` option intent.
+ */
+export type VideoRetainPolicy = 'on-failure' | 'always';
+
+const DEFAULT_RETAIN_POLICY: VideoRetainPolicy = 'on-failure';
+
+/** Resolve the retain policy from `VW_VIDEO_RETAIN`; anything but `always` is `on-failure`. */
+export function resolveVideoRetainPolicy(): VideoRetainPolicy {
+  const raw = (process.env['VW_VIDEO_RETAIN'] ?? '').trim().toLowerCase();
+  return raw === 'always' ? 'always' : DEFAULT_RETAIN_POLICY;
+}
+
+/**
+ * Whether the recording should be attached for this test result. `always`
+ * retains unconditionally; `on-failure` retains when the observed status differs
+ * from the expected one (a genuine failure, or a passing test that was expected
+ * to fail).
+ */
+export function shouldRetainVideo(
+  status: string | undefined,
+  expectedStatus: string | undefined,
+  policy: VideoRetainPolicy
+): boolean {
+  return policy === 'always' || status !== expectedStatus;
 }
 
 function findFfmpegOnPath(): string | undefined {
