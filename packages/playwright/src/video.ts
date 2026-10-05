@@ -1,11 +1,13 @@
 /**
  * video.ts — opt-in failure video (VW_VIDEO=1).
  *
- * Polls the in-image POST /render route at VW_VIDEO_FPS (default 1) and buffers
- * PNG frames on disk. /render draws one window's view into an offscreen Pixmap
- * inside the image, so capture does not depend on the Windows desktop: occluded,
- * unfocused and fully off-screen windows render correctly (the old OS-screenshot
- * source failed into black video when the desktop was locked or RDP dropped).
+ * Polls the in-image POST /render route at VW_VIDEO_FPS (default 2) and buffers
+ * PNG frames on disk. The default source is the bridge's OS capture
+ * (`source: 'os'`), which is colour-correct; it is fast when the bridge can read
+ * the window's own device (occlusion-independent) and falls back to the
+ * PrintWindow subprocess when it cannot. (VW_VIDEO_SOURCE=in-image opts back
+ * into the offscreen Pixmap render, kept only as a fallback: its colours are
+ * wrong on this image.)
  *
  * TARGET RESOLUTION IS DYNAMIC. At bridge start the only live windows are VW
  * tool windows (VisualLauncher / GbxVisualLauncher / Workbook); the window a
@@ -41,6 +43,15 @@
  * when ffmpeg is missing or fails, the raw frames are attached instead and the
  * test result is never affected.
  *
+ * FRAMES SHARE ONE CANVAS. The filmed window can change mid-recording (e.g. the
+ * launcher at 831x322, then a scenario window at 1000x793), and the concat
+ * demuxer fixes its output dimensions from the first frame, so mixed sizes
+ * would be cropped to the first frame's size. When the frames do not all share
+ * one even canvas (the max width/height across frames), assembly first rewrites
+ * every frame onto that canvas with a single ffmpeg pass: each input gets its
+ * own scale-to-fit (lanczos, never an upscale) + centred black pad chain.
+ * Uniform frames skip that pass and keep the one-process assembly.
+ *
  * The capture loop is a single unref'd interval with an in-flight guard: frame
  * I/O is async so the test's event loop is never blocked and a slow capture is
  * never stacked onto. `stop()` clears the timer, waits (bounded) for the
@@ -66,7 +77,12 @@ import { buildConcatFile, computeFrameDurations } from './frameTimeline.js';
 import { inspectFrame } from './frameGuard.js';
 import { encodeBgraToPng } from './png.js';
 
-const DEFAULT_FPS = 1;
+/**
+ * Default capture rate. With the bridge's fast /render path (~45 ms/frame) this
+ * is the cheapest rate that actually shows screen transitions; override with
+ * `VW_VIDEO_FPS`.
+ */
+const DEFAULT_FPS = 2;
 const MIN_FPS = 0.1;
 const MAX_FPS = 10;
 const FRAME_CAPTURE_TIMEOUT_MS = 15_000;
@@ -129,7 +145,7 @@ function isVwToolWindow(window: WindowSummary): boolean {
 }
 
 export interface VideoRecordingOptions {
-  /** Capture rate; default `VW_VIDEO_FPS` ?? 1, clamped to [0.1, 10]. */
+  /** Capture rate; default `VW_VIDEO_FPS` ?? 2, clamped to [0.1, 10]. */
   fps?: number;
   /** Frame buffer directory; default a fresh `vw-test-sdk-video-*` dir under os.tmpdir(). */
   frameDir?: string;
@@ -328,6 +344,114 @@ export function buildVideoEncodeArgs(
   return args;
 }
 
+/** One captured frame's pixel dimensions. */
+export interface FrameSize {
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * The single even canvas every frame is normalised to: the maximum width and
+ * height across the captured frames, each rounded up to the next even number
+ * (yuv420p requires even dimensions). Returns undefined for an empty set. Using
+ * the maxima means no frame is ever upscaled: the filter only shrinks a frame
+ * that exceeds the canvas, and smaller frames are centred on black padding.
+ */
+export function computeCanvasSize(sizes: readonly FrameSize[]): FrameSize | undefined {
+  if (sizes.length === 0) return undefined;
+  let width = 0;
+  let height = 0;
+  for (const size of sizes) {
+    width = Math.max(width, size.width);
+    height = Math.max(height, size.height);
+  }
+  return { width: toEven(width), height: toEven(height) };
+}
+
+/** True when at least one frame is not already exactly the canvas size. */
+export function framesNeedNormalisation(sizes: readonly FrameSize[], canvas: FrameSize): boolean {
+  return sizes.some((size) => size.width !== canvas.width || size.height !== canvas.height);
+}
+
+function toEven(value: number): number {
+  return value % 2 === 0 ? value : value + 1;
+}
+
+/**
+ * The `-filter_complex` script that normalises N still frames onto one canvas:
+ * one chain per input, each scaling to fit (lanczos; `decrease` never upscales)
+ * and centring the result on a black pad. Outputs are labelled `[n0]`, `[n1]`,
+ * ... for the per-output `-map` arguments.
+ */
+export function buildFrameNormaliseFilterScript(frameCount: number, canvas: FrameSize): string {
+  const chains: string[] = [];
+  for (let i = 0; i < frameCount; i += 1) {
+    const scale =
+      `[${String(i)}:v]scale=${String(canvas.width)}:${String(canvas.height)}` +
+      ':force_original_aspect_ratio=decrease:flags=lanczos';
+    const pad =
+      `,pad=${String(canvas.width)}:${String(canvas.height)}:(ow-iw)/2:(oh-ih)/2:color=black` +
+      `[n${String(i)}]`;
+    chains.push(scale + pad);
+  }
+  return `${chains.join(';\n')}\n`;
+}
+
+/**
+ * The ffmpeg argument vector for the canvas-normalisation pass. Every frame is
+ * its own `-i` input, so changing source dimensions between frames is fine —
+ * unlike the concat demuxer, which fixes stream dimensions from the first
+ * frame. The per-input chains live in a filter script file (a long inline
+ * `-filter_complex` value risks the Windows command-line limit) and every
+ * output PNG is declared by its own `-map [nK]`.
+ */
+export function buildFrameNormaliseArgs(
+  inputs: readonly string[],
+  outputs: readonly string[],
+  filterScriptPath: string
+): string[] {
+  if (inputs.length !== outputs.length) {
+    throw new Error(
+      `buildFrameNormaliseArgs: ${inputs.length} input(s) but ${outputs.length} output(s)`
+    );
+  }
+  const args = ['-y', '-hide_banner', '-loglevel', 'error'];
+  for (const input of inputs) args.push('-i', input);
+  args.push('-filter_complex_script', filterScriptPath);
+  for (let i = 0; i < outputs.length; i += 1) {
+    args.push('-map', `[n${String(i)}]`, outputs[i]);
+  }
+  return args;
+}
+
+/**
+ * Rewrite every frame onto `canvas` with ONE ffmpeg invocation and return the
+ * normalised paths, or undefined when ffmpeg failed and the caller should keep
+ * the raw-frame fallback. Normalised files sit beside the originals with a
+ * `.norm.png` suffix so the concat list's bare-filename contract still holds.
+ */
+async function normaliseFramesToCanvas(
+  ffmpegPath: string,
+  inputs: readonly string[],
+  canvas: FrameSize,
+  frameDir: string
+): Promise<string[] | undefined> {
+  const outputs = inputs.map((input) => join(frameDir, `${basename(input, '.png')}.norm.png`));
+  const filterScriptPath = join(frameDir, 'normalise.filter');
+  await fs.writeFile(
+    filterScriptPath,
+    buildFrameNormaliseFilterScript(inputs.length, canvas),
+    'utf-8'
+  );
+  const result = await runFfmpeg(
+    ffmpegPath,
+    buildFrameNormaliseArgs(inputs, outputs, filterScriptPath)
+  );
+  if (!result.ok) return undefined;
+  const complete = outputs.every((output) => existsSync(output) && statSync(output).size > 0);
+  return complete ? outputs : undefined;
+}
+
 /** Construction inputs for {@link FrameRecorder} (kept as one object: >3 fields). */
 interface FrameRecorderConfig {
   vw: VWTestClient;
@@ -350,6 +474,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   private readonly startedAt: number;
   private readonly paths: string[] = [];
   private readonly times: number[] = [];
+  private readonly sizes: FrameSize[] = [];
   private resolvedWindow: RenderWindow | undefined;
   private inFlight: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -508,6 +633,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
         await fs.writeFile(path, png);
         this.paths.push(path);
         this.times.push(sampledAt);
+        this.sizes.push({ width: frame.width, height: frame.height });
         this.captureError = undefined;
       } catch (error) {
         this.captureError = messageOf(error);
@@ -655,7 +781,21 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
     }
     const outputPath = join(this.frameDir, 'video.mp4');
     const listPath = join(this.frameDir, CONCAT_LIST_NAME);
-    await fs.writeFile(listPath, this.buildConcatList(), 'utf-8');
+    let assemblyPaths: readonly string[] = this.paths;
+    const canvas = computeCanvasSize(this.sizes);
+    if (canvas !== undefined && framesNeedNormalisation(this.sizes, canvas)) {
+      const normalised = await normaliseFramesToCanvas(
+        ffmpegPath,
+        this.paths,
+        canvas,
+        this.frameDir
+      );
+      if (normalised === undefined) {
+        return 'ffmpeg could not normalise mixed-size frames onto one canvas';
+      }
+      assemblyPaths = normalised;
+    }
+    await fs.writeFile(listPath, this.buildConcatList(assemblyPaths), 'utf-8');
     const result = await runFfmpeg(
       ffmpegPath,
       buildVideoEncodeArgs(listPath, outputPath, resolveEncodeOptions())
@@ -674,10 +814,10 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
    * paths are bare file names: the list is written into the frame directory and
    * the concat demuxer resolves relative names against the list's own directory.
    */
-  private buildConcatList(): string {
+  private buildConcatList(paths: readonly string[] = this.paths): string {
     const durations = computeFrameDurations(this.times, this.stoppedAt ?? Date.now());
     return buildConcatFile(
-      this.paths.map((path) => basename(path)),
+      paths.map((path) => basename(path)),
       durations
     );
   }

@@ -7,6 +7,10 @@ import {
   startVideoRecording,
   resolveFfmpegPath,
   buildVideoEncodeArgs,
+  buildFrameNormaliseArgs,
+  buildFrameNormaliseFilterScript,
+  computeCanvasSize,
+  framesNeedNormalisation,
   resolveEncodeOptions,
   resolveVideoRetainPolicy,
   resolveVideoSource,
@@ -139,11 +143,11 @@ describe('startVideoRecording', () => {
     await recording.discard();
   });
 
-  it('clamps an invalid VW_VIDEO_FPS to the 1 fps default', async () => {
+  it('clamps an invalid VW_VIDEO_FPS to the 2 fps default', async () => {
     vi.stubEnv('VW_VIDEO', '1');
     vi.stubEnv('VW_VIDEO_FPS', 'banana');
     const recorder = startVideoRecording(makeVw());
-    expect(recorder?.fps).toBe(1);
+    expect(recorder?.fps).toBe(2);
     const recording = await recorder?.stop();
     await recording?.discard();
   });
@@ -222,6 +226,20 @@ function probeDurationSeconds(ffmpegPath: string, videoPath: string): number {
   const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(`${result.stderr ?? ''}`);
   if (match === null) throw new Error(`ffmpeg reported no Duration for ${videoPath}`);
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+/** Dimensions of the first video stream — proves every frame shares one canvas. */
+function probeVideoDimensions(
+  ffmpegPath: string,
+  videoPath: string
+): { width: number; height: number } {
+  const result = spawnSync(ffmpegPath, ['-hide_banner', '-i', videoPath], { encoding: 'utf-8' });
+  const streamLine = `${result.stderr ?? ''}`
+    .split(/\r?\n/)
+    .find((line) => line.includes(' Video: '));
+  const match = /(\d{2,5})x(\d{2,5})/.exec(streamLine ?? '');
+  if (match === null) throw new Error(`ffmpeg reported no video dimensions for ${videoPath}`);
+  return { width: Number(match[1]), height: Number(match[2]) };
 }
 
 /** Frames ffmpeg actually decodes — proves frames are held, not dropped. */
@@ -567,6 +585,55 @@ describe('video assembly', () => {
     }
   );
 
+  it.skipIf(!FFMPEG_AVAILABLE)(
+    'normalises frames of different sizes onto one canvas before assembly',
+    async () => {
+      const ffmpegPath = FFMPEG_PATH;
+      if (ffmpegPath === undefined) throw new Error('ffmpeg unavailable');
+
+      vi.stubEnv('VW_VIDEO', '1');
+      vi.stubEnv('VW_VIDEO_FPS', '10');
+      const sizes = [
+        { width: 64, height: 48 },
+        { width: 100, height: 80 },
+      ];
+      let callIndex = 0;
+      const vw = makeVw({
+        render: vi.fn(async () => {
+          const size = sizes[callIndex % sizes.length];
+          callIndex += 1;
+          return makeBgraFrame(size.width, size.height);
+        }),
+      });
+      const recorder = startVideoRecording(vw)!;
+      await waitForFrames(recorder, 3);
+      const recording = await recorder.stop();
+      expect(recording.frameCount).toBeGreaterThanOrEqual(3);
+
+      const frameDir = dirname(recording.framePaths[0]);
+      let filterExistedAtAttach = false;
+
+      const keepDir = mkdtempSync(join(tmpdir(), 'vw-video-canvas-'));
+      let videoPath: string | undefined;
+      const attach = vi.fn(async (name: string, options?: unknown) => {
+        if (name !== 'video.mp4') return;
+        filterExistedAtAttach = existsSync(join(frameDir, 'normalise.filter'));
+        videoPath = join(keepDir, 'video.mp4');
+        copyFileSync((options as { path: string }).path, videoPath);
+      });
+      await recording.attach({ attach } as unknown as AttachableTestInfo);
+      if (videoPath === undefined) throw new Error('video.mp4 was not attached');
+
+      const dimensions = probeVideoDimensions(ffmpegPath, videoPath);
+      const decodedFrames = probeDecodedFrameCount(ffmpegPath, videoPath);
+      rmSync(keepDir, { recursive: true, force: true });
+
+      expect(filterExistedAtAttach).toBe(true);
+      expect(dimensions).toEqual({ width: 100, height: 80 });
+      expect(decodedFrames).toBe(recording.frameCount + 1);
+    }
+  );
+
   it.skipIf(!FFMPEG_AVAILABLE)('encodes an mp4 with a real ffmpeg binary and attaches it', async () => {
       vi.stubEnv('VW_VIDEO', '1');
       vi.stubEnv('VW_VIDEO_FPS', '10');
@@ -589,6 +656,72 @@ describe('video assembly', () => {
       expect(checks).toHaveLength(1);
       expect(checks[0].exists).toBe(true);
       expect(checks[0].size).toBeGreaterThan(0);
+  });
+});
+
+describe('frame canvas normalisation', () => {
+  it('uses the even max width/height across frames so nothing is upscaled', () => {
+    expect(
+      computeCanvasSize([
+        { width: 831, height: 322 },
+        { width: 1000, height: 793 },
+      ])
+    ).toEqual({ width: 1000, height: 794 });
+  });
+
+  it('returns undefined for no frames', () => {
+    expect(computeCanvasSize([])).toBeUndefined();
+  });
+
+  it('flags only frame sets that differ from the canvas', () => {
+    const canvas = { width: 100, height: 80 };
+    expect(framesNeedNormalisation([{ width: 100, height: 80 }], canvas)).toBe(false);
+    expect(
+      framesNeedNormalisation(
+        [
+          { width: 64, height: 48 },
+          { width: 100, height: 80 },
+        ],
+        canvas
+      )
+    ).toBe(true);
+  });
+
+  it('builds one scale-to-fit + pad chain per input, ending in its output label', () => {
+    expect(buildFrameNormaliseFilterScript(2, { width: 500, height: 400 })).toBe(
+      [
+        '[0:v]scale=500:400:force_original_aspect_ratio=decrease:flags=lanczos,pad=500:400:(ow-iw)/2:(oh-ih)/2:color=black[n0];',
+        '[1:v]scale=500:400:force_original_aspect_ratio=decrease:flags=lanczos,pad=500:400:(ow-iw)/2:(oh-ih)/2:color=black[n1]',
+        '',
+      ].join('\n')
+    );
+  });
+
+  it('maps each normalised output one-for-one and rejects a length mismatch', () => {
+    const args = buildFrameNormaliseArgs(
+      ['a.png', 'b.png'],
+      ['a.norm.png', 'b.norm.png'],
+      'normalise.filter'
+    );
+    expect(args).toEqual([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      'a.png',
+      '-i',
+      'b.png',
+      '-filter_complex_script',
+      'normalise.filter',
+      '-map',
+      '[n0]',
+      'a.norm.png',
+      '-map',
+      '[n1]',
+      'b.norm.png',
+    ]);
+    expect(() => buildFrameNormaliseArgs(['a.png'], [], 'normalise.filter')).toThrow();
   });
 });
 
