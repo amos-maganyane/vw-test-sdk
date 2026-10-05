@@ -59,10 +59,20 @@ export interface RenderTarget {
   appClass?: string;
 }
 
+/**
+ * Capture source for POST /render.
+ * - `os` (bridge default): OS-level capture via the screenshot helper's raw
+ *   mode — colour-correct, occlusion-independent, cropped to the client area.
+ * - `in-image`: the offscreen in-image Pixmap render (v0.14.0 path).
+ */
+export type RenderSource = 'os' | 'in-image';
+
 /** Optional knobs for POST /render. */
 export interface RenderRequestOptions {
   /** Max raw bytes to transfer (bridge clamps 1..16_777_216). */
   maxBytes?: number;
+  /** Capture source; omitted => the bridge's own default (`os`). */
+  source?: RenderSource;
 }
 
 /**
@@ -223,6 +233,7 @@ export class BridgeClient implements BridgeClientLike {
   async render(target: RenderTarget, opts: RenderRequestOptions = {}): Promise<RenderFrame> {
     const body: Record<string, unknown> = { target: { ...target } };
     if (opts.maxBytes !== undefined) body['maxBytes'] = opts.maxBytes;
+    if (opts.source !== undefined) body['source'] = opts.source;
     const { bytes, headers } = await this.postBinaryWithHeaders('/render', body);
     const width = requirePositiveIntHeader(headers, 'x-vwbridge-render-width');
     const height = requirePositiveIntHeader(headers, 'x-vwbridge-render-height');

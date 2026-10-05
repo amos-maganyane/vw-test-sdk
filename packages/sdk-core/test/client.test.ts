@@ -264,6 +264,23 @@ describe('VWTestClient — evidence + utilities', () => {
     );
   });
 
+  it('render threads an explicit source into the bridge request options', async () => {
+    const bridge = makeStubBridge();
+    const vw = new VWTestClient({}, bridge);
+    await vw.render({ appClass: 'VisualLauncher', source: 'in-image' });
+    expect(vi.mocked(bridge.render)).toHaveBeenCalledWith(
+      { appClass: 'VisualLauncher' },
+      { source: 'in-image' }
+    );
+  });
+
+  it('render omits source when unset so the bridge default applies', async () => {
+    const bridge = makeStubBridge();
+    const vw = new VWTestClient({}, bridge);
+    await vw.render({ appClass: 'VisualLauncher' });
+    expect(vi.mocked(bridge.render)).toHaveBeenCalledWith({ appClass: 'VisualLauncher' }, {});
+  });
+
   it('render records an action by default but not with recordAction:false', async () => {
     const vw = new VWTestClient({}, makeStubBridge());
     await vw.render({ appClass: 'VisualLauncher', recordAction: false });

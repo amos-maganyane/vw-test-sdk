@@ -9,7 +9,7 @@
  * appClass MUST be supplied or the bridge answers HTTP 400.
  */
 
-import type { RenderFrame, RenderTarget } from '@enviro365/vw-bridge-client';
+import type { RenderFrame, RenderSource, RenderTarget } from '@enviro365/vw-bridge-client';
 import type { HighlightRenderOptions, WidgetRect } from './highlight.js';
 
 export interface RenderOptions {
@@ -17,6 +17,12 @@ export interface RenderOptions {
   windowTitle?: string;
   /** VW application class to disambiguate the window target. */
   appClass?: string;
+  /**
+   * Capture source for the frame: `os` (bridge default) uses the colour-correct
+   * OS capture cropped to the client area; `in-image` uses the offscreen Pixmap
+   * render. Omitted => the bridge default (`os`).
+   */
+  source?: RenderSource;
   /** Max raw bytes (bridge clamps 1..16_777_216). */
   maxBytes?: number;
   /** Per-call HTTP timeout for the render (ms). */
@@ -50,6 +56,7 @@ export interface HighlightedRenderFrame extends RenderFrame {
 export interface RenderSpec {
   target: RenderTarget;
   maxBytes?: number;
+  source?: RenderSource;
 }
 
 export function buildRenderSpec(opts: RenderOptions): RenderSpec {
@@ -59,5 +66,6 @@ export function buildRenderSpec(opts: RenderOptions): RenderSpec {
 
   const spec: RenderSpec = { target };
   if (opts.maxBytes !== undefined) spec.maxBytes = opts.maxBytes;
+  if (opts.source !== undefined) spec.source = opts.source;
   return spec;
 }

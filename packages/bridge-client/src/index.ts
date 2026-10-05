@@ -13,6 +13,7 @@ export type {
   BridgeVersion,
   BridgeEvalResult,
   RenderTarget,
+  RenderSource,
   RenderRequestOptions,
   RenderFrame,
 } from './bridge.js';

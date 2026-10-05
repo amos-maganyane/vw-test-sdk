@@ -102,6 +102,7 @@ export type {
   BridgeVersion,
   BridgeEvalResult,
   RenderTarget,
+  RenderSource,
   RenderRequestOptions,
   RenderFrame,
 } from '@enviro365/vw-bridge-client';

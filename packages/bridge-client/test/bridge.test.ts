@@ -327,6 +327,28 @@ describe('BridgeClient — render', () => {
     expect(init?.body).toBe(JSON.stringify({ target: { titleContains: 'storedev64' }, maxBytes: 1024 }));
   });
 
+  it('render() includes an explicit source in the /render request body', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(renderResponse(new Uint8Array(4), 1, 1));
+    const tokenFile = await makeTokenFile('tok-1');
+    const client = new BridgeClient({ bridgeUrl: 'http://127.0.0.1:9876', tokenFile });
+
+    await client.render({ titleContains: 'x' }, { source: 'in-image' });
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1];
+    expect(init?.body).toBe(JSON.stringify({ target: { titleContains: 'x' }, source: 'in-image' }));
+  });
+
+  it('render() omits source when unset so the bridge default applies', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(renderResponse(new Uint8Array(4), 1, 1));
+    const tokenFile = await makeTokenFile('tok-1');
+    const client = new BridgeClient({ bridgeUrl: 'http://127.0.0.1:9876', tokenFile });
+
+    await client.render({ titleContains: 'x' });
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1];
+    expect(init?.body).toBe(JSON.stringify({ target: { titleContains: 'x' } }));
+  });
+
   it('render() rejects when the body size does not match the reported dimensions', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(renderResponse(new Uint8Array(8), 2, 2));
     const tokenFile = await makeTokenFile('tok-1');

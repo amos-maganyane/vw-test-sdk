@@ -406,6 +406,7 @@ export class VWTestClient {
     const spec = buildRenderSpec(opts);
     const requestOptions: RenderRequestOptions = {};
     if (spec.maxBytes !== undefined) requestOptions.maxBytes = spec.maxBytes;
+    if (spec.source !== undefined) requestOptions.source = spec.source;
     const frame =
       opts.timeoutMs !== undefined
         ? await this.withTimeout(opts.timeoutMs, () => this.bridge.render(spec.target, requestOptions))
