@@ -67,6 +67,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import {
   composeInteractionOverlay,
+  composeInteractionTimeline,
   findRecordedInteractionAt,
   isHighlightEnabled,
 } from '@enviro365/vw-test-sdk-core';
@@ -169,10 +170,11 @@ export interface VideoRecordingOptions {
    */
   targetWaitMs?: number;
   /**
-   * Bake the recorded action overlay (target box + click dot + cursor) into
-   * every frame; default `VW_HIGHLIGHT` env (truthy). Geometry is captured at
-   * action time by the widget handles while this is enabled, and replayed per
-   * frame before PNG encoding, so it appears in the assembled video.
+   * Bake the time-based interaction overlay (target box + click ripples +
+   * travelling cursor + click dot) into every frame; default `VW_HIGHLIGHT` env
+   * (truthy). Geometry is captured at action time by the widget handles while
+   * this is enabled, and evaluated per frame against the frame's timestamp
+   * before PNG encoding, so travel and ripples appear in the assembled video.
    */
   highlight?: boolean;
 }
@@ -638,7 +640,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
           );
         }
         if (this.highlightEnabled) {
-          composeRecordedInteractionOverlay(
+          composeInteractionTimeline(
             frame.bytes,
             frame.width,
             frame.height,
@@ -999,11 +1001,11 @@ function renderOptionsFor(window: RenderWindow, capture: RenderCaptureSettings):
 }
 
 /**
- * Bake the recorded interaction overlay into one captured frame IN PLACE
- * (target box + click dot + cursor). The most recent interactive action at or
- * before `sampledAt` wins, replayed from the geometry it recorded at action
- * time. Answers 0 — frame untouched — when no recorded geometry is available;
- * a frame is never discarded.
+ * Bake a single recorded interaction into one captured frame IN PLACE (target
+ * box + click dot + cursor), without travel or ripples. Superseded by
+ * `composeInteractionTimeline` in the recorder; kept exported for back-compat.
+ * Answers 0 — frame untouched — when no recorded geometry is available; a frame
+ * is never discarded.
  */
 export function composeRecordedInteractionOverlay(
   bytes: Uint8Array,

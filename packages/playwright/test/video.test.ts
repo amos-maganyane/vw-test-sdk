@@ -844,6 +844,53 @@ describe('recorded interaction overlay', () => {
     expect(bytes.every((byte) => byte === 0)).toBe(true);
   });
 
+  it('bakes time-based cursor travel and ripples from the recorded timeline', async () => {
+    vi.stubEnv('VW_VIDEO', '1');
+    vi.stubEnv('VW_VIDEO_FPS', '10');
+    vi.stubEnv('VW_HIGHLIGHT', '1');
+    const frames: Array<{ bytes: Uint8Array }> = [];
+    const events: ActionEvent[] = [
+      {
+        ts: 1_000,
+        kind: 'click',
+        ok: true,
+        detail: { aspect: 'a', windowTitle: WINDOW.title, rect: { x: 0, y: 22, width: 20, height: 20 } },
+      },
+      {
+        ts: 1_400,
+        kind: 'click',
+        ok: true,
+        detail: { aspect: 'b', windowTitle: WINDOW.title, rect: { x: 20, y: 22, width: 20, height: 20 } },
+      },
+    ];
+    const vw = makeVw({
+      render: vi.fn(async () => {
+        const frame = makeBgraFrame();
+        frames.push(frame);
+        return frame;
+      }),
+      getActionLog: vi.fn(() => events),
+    });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_700);
+    try {
+      const recorder = startVideoRecording(vw)!;
+      const recording = await recorder.stop();
+      await recording.discard();
+    } finally {
+      now.mockRestore();
+      vi.unstubAllEnvs();
+    }
+
+    expect(frames.length).toBeGreaterThan(0);
+    const first = frames[0]!;
+    // gap 400ms -> T = 1000ms; at 1700ms: u = (1700-1400+400)/1000 = 0.7 ->
+    // e = 1-(-2*0.7+2)^3/2 = 0.892 -> x = 10 + 20*0.892 = 27.84 -> tip at (28,32).
+    expect(pixel(first.bytes, 28, 32)).toEqual([255, 255, 255]);
+    // the current click's ripple (age 300ms) is at (52,32), over the frame background:
+    // alpha = 0.9*(1-300/1800) = 0.75 -> b=199, g=107, r=103
+    expect(pixel(first.bytes, 52, 32)).toEqual([199, 107, 103]);
+  });
+
   it('bakes frames without asking the client for a capture-time border', async () => {
     vi.stubEnv('VW_VIDEO', '1');
     vi.stubEnv('VW_VIDEO_FPS', '10');

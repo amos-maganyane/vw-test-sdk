@@ -5,9 +5,12 @@ import {
   composeCursorGlyph,
   composeHighlightBorder,
   composeInteractionOverlay,
+  composeInteractionTimeline,
+  composeRipple,
   composeTargetBox,
   findLatestInteraction,
   findRecordedInteractionAt,
+  findRecordedTimelineAt,
   highlightColorForPurpose,
   isHighlightEnabled,
   parseWidgetRect,
@@ -296,6 +299,65 @@ describe('composeCursorGlyph', () => {
   });
 });
 
+describe('composeRipple', () => {
+  const WIDTH = 100;
+  const HEIGHT = 100;
+  const point = { x: 50, y: 50 };
+
+  function pixel(bytes: Uint8Array, width: number, x: number, y: number): number[] {
+    const i = (y * width + x) * 4;
+    return [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+  }
+
+  it('paints an antialiased ring whose radius follows the ease-out curve', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    const painted = composeRipple(bytes, WIDTH, HEIGHT, point, 0.5);
+    expect(painted).toBeGreaterThan(0);
+    // progress 0.5 -> e = 1-(1-0.5)^3 = 0.875 -> r = 6 + 38*0.875 = 39.25.
+    // A pixel at distance 39 sits fully inside the stroke band, so its coverage
+    // is 1 and its alpha is 0.9*(1-0.5) = 0.45 of {r:71,g:133,b:255}:
+    // b = 255*0.45 = 115, g = 133*0.45 = 60, r = 71*0.45 = 32.
+    expect(pixel(bytes, WIDTH, 89, 50)).toEqual([115, 60, 32, 255]);
+    // the hole inside the ring and the centre stay untouched
+    expect(pixel(bytes, WIDTH, 50, 50)).toEqual([0, 0, 0, 0]);
+    expect(pixel(bytes, WIDTH, 61, 50)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('fades the ring as progress approaches 1', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    composeRipple(bytes, WIDTH, HEIGHT, point, 0.9);
+    // r = 6 + 38*(1-(1-0.9)^3) = 43.962, so a pixel at distance 44 is in-band;
+    // alpha = 0.9*(1-0.9) = 0.09 -> b=23, g=12, r=6.
+    expect(pixel(bytes, WIDTH, 94, 50)).toEqual([23, 12, 6, 255]);
+  });
+
+  it('paints nothing for progress at or beyond the 0..1 range', () => {
+    for (const progress of [0, -0.2, 1, 1.5, Number.NaN]) {
+      const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+      expect(composeRipple(bytes, WIDTH, HEIGHT, point, progress)).toBe(0);
+      expect(bytes.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
+  it('scales both radii with the scale option', () => {
+    const width = 200;
+    const height = 200;
+    const bytes = new Uint8Array(width * height * 4);
+    const painted = composeRipple(bytes, width, height, { x: 100, y: 100 }, 0.5, { scale: 2 });
+    expect(painted).toBeGreaterThan(0);
+    // scaled: r = 12 + 76*0.875 = 78.5 -> distance 78 is in-band, distance 11 is the hole
+    expect(pixel(bytes, width, 178, 100)).toEqual([115, 60, 32, 255]);
+    expect(pixel(bytes, width, 111, 100)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('never throws and paints nothing for points fully outside the frame', () => {
+    const bytes = new Uint8Array(4 * 4 * 4);
+    expect(composeRipple(bytes, 4, 4, { x: -100, y: -100 }, 0.5)).toBe(0);
+    expect(composeRipple(bytes, 4, 4, { x: 1_000, y: 1_000 }, 0.5)).toBe(0);
+    expect(bytes.every((byte) => byte === 0)).toBe(true);
+  });
+});
+
 describe('composeInteractionOverlay', () => {
   const WIDTH = 64;
   const HEIGHT = 64;
@@ -349,9 +411,16 @@ describe('findRecordedInteractionAt', () => {
     ];
     expect(findRecordedInteractionAt(events, 250)).toEqual({
       rect: { x: 5, y: 5, width: 5, height: 5 },
+      point: { x: 7.5, y: 7.5 },
       purpose: 'type',
+      ts: 200,
     });
-    expect(findRecordedInteractionAt(events, 150)).toEqual({ rect, purpose: 'focus' });
+    expect(findRecordedInteractionAt(events, 150)).toEqual({
+      rect,
+      point: { x: 2.5, y: 4 },
+      purpose: 'focus',
+      ts: 100,
+    });
     expect(findRecordedInteractionAt(events, 50)).toBeNull();
   });
 
@@ -375,6 +444,158 @@ describe('findRecordedInteractionAt', () => {
 
   it('answers null for an empty log', () => {
     expect(findRecordedInteractionAt([], 1_000)).toBeNull();
+  });
+});
+
+describe('findRecordedTimelineAt', () => {
+  const rectA = { x: 0, y: 0, width: 20, height: 20 };
+  const rectB = { x: 20, y: 0, width: 20, height: 20 };
+
+  it('answers the current and previous geometry-bearing interactive actions', () => {
+    const events: ActionEvent[] = [
+      { ts: 1_000, kind: 'click', ok: true, detail: { aspect: 'a', rect: rectA } },
+      { ts: 1_600, kind: 'fill', ok: true, detail: { aspect: 'b', rect: rectB } },
+      { ts: 2_000, kind: 'render', ok: true, detail: { rect: rectA } },
+      { ts: 2_500, kind: 'click', ok: true, detail: { aspect: 'c' } },
+    ];
+    expect(findRecordedTimelineAt(events, 2_600)).toEqual({
+      current: { rect: rectB, point: { x: 30, y: 10 }, purpose: 'type', ts: 1_600 },
+      previous: { rect: rectA, point: { x: 10, y: 10 }, purpose: 'focus', ts: 1_000 },
+    });
+    expect(findRecordedTimelineAt(events, 1_500)).toEqual({
+      current: { rect: rectA, point: { x: 10, y: 10 }, purpose: 'focus', ts: 1_000 },
+      previous: null,
+    });
+  });
+
+  it('answers nulls before the first geometry-bearing interaction', () => {
+    const events: ActionEvent[] = [{ ts: 1_000, kind: 'click', ok: true, detail: { rect: rectA } }];
+    expect(findRecordedTimelineAt(events, 500)).toEqual({ current: null, previous: null });
+    expect(findRecordedTimelineAt([], 1_000)).toEqual({ current: null, previous: null });
+  });
+});
+
+describe('composeInteractionTimeline', () => {
+  const WIDTH = 64;
+  const HEIGHT = 64;
+
+  function pixel(bytes: Uint8Array, width: number, x: number, y: number): number[] {
+    const i = (y * width + x) * 4;
+    return [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+  }
+
+  /** Click at (10,32). */
+  const previousClick = (ts: number): ActionEvent => ({
+    ts,
+    kind: 'click',
+    ok: true,
+    detail: { rect: { x: 0, y: 22, width: 20, height: 20 } },
+  });
+  /** Click at (30,32). */
+  const currentClick = (ts: number): ActionEvent => ({
+    ts,
+    kind: 'click',
+    ok: true,
+    detail: { rect: { x: 20, y: 22, width: 20, height: 20 } },
+  });
+
+  it('travels the cursor between the previous and current click points', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    // gap 400ms -> T = clamp(400, 1000, 1500) = 1000ms, travel starts at 600ms.
+    // At 1100ms: u = (1100-1000+400)/1000 = 0.5 -> e = 0.5 -> x = 10 + 20*0.5 = 20.
+    const painted = composeInteractionTimeline(
+      bytes,
+      WIDTH,
+      HEIGHT,
+      [previousClick(600), currentClick(1_000)],
+      1_100
+    );
+    expect(painted).toBeGreaterThan(0);
+    expect(pixel(bytes, WIDTH, 20, 32)).toEqual([255, 255, 255, 255]);
+    // the destination still shows the click dot, i.e. the cursor has not arrived yet
+    expect(pixel(bytes, WIDTH, 30, 32)).toEqual([11, 6, 179, 255]);
+  });
+
+  it('snaps the cursor to the current point when the gap exceeds 1.2 s', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    // gap 2000ms > 1200ms -> no travel: the tip sits on the current point
+    composeInteractionTimeline(bytes, WIDTH, HEIGHT, [previousClick(1_000), currentClick(3_000)], 3_500);
+    expect(pixel(bytes, WIDTH, 30, 32)).toEqual([255, 255, 255, 255]);
+    expect(pixel(bytes, WIDTH, 10, 32)).toEqual([0, 0, 0, 0]);
+    // (18,32) is one px left of the box: a cursor still near the previous point
+    // would leave its opaque black outline here, a snapped cursor leaves it clear
+    expect(pixel(bytes, WIDTH, 18, 32)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('holds the cursor at the current point once travel has finished', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    // u clamps to 1 long before 2500ms -> the cursor parks at (30,32)
+    composeInteractionTimeline(bytes, WIDTH, HEIGHT, [previousClick(600), currentClick(1_000)], 2_500);
+    expect(pixel(bytes, WIDTH, 30, 32)).toEqual([255, 255, 255, 255]);
+    expect(pixel(bytes, WIDTH, 18, 32)).toEqual([0, 0, 0, 0]);
+    expect(pixel(bytes, WIDTH, 10, 32)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('draws an expanding ripple at age 500 ms and nothing at age 2 s', () => {
+    const width = 100;
+    const height = 100;
+    const click: ActionEvent = {
+      ts: 1_000,
+      kind: 'click',
+      ok: true,
+      detail: { rect: { x: 40, y: 40, width: 20, height: 20 } },
+    };
+    const bytes = new Uint8Array(width * height * 4);
+    composeInteractionTimeline(bytes, width, height, [click], 1_500);
+    // age 500/1800 -> r = 29.685; distance 29 is in-band and
+    // alpha = 0.9*(1-500/1800) = 0.65 -> b=166, g=86, r=46.
+    expect(pixel(bytes, width, 79, 50)).toEqual([166, 86, 46, 255]);
+
+    const expired = new Uint8Array(width * height * 4);
+    composeInteractionTimeline(expired, width, height, [click], 3_000);
+    // age 2000 >= 1800 -> no ripple; box/dot/cursor never reach (79,50)
+    expect(pixel(expired, width, 79, 50)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('caps active ripples at the six newest clicks', () => {
+    const width = 100;
+    const height = 100;
+    const points = [8, 22, 36, 50, 64, 78, 92];
+    const clicks: ActionEvent[] = points.map((x, index) => ({
+      ts: 1_000 + index,
+      kind: 'click',
+      ok: true,
+      detail: { rect: { x: x - 5, y: 45, width: 10, height: 10 } },
+    }));
+
+    const bytes = new Uint8Array(width * height * 4);
+    const paintedSeven = composeInteractionTimeline(bytes, width, height, clicks, 1_007);
+    // the oldest click (x=8, age 7) is beyond the cap of six newest -> no ring
+    expect(pixel(bytes, width, 8, 56)).toEqual([0, 0, 0, 0]);
+    // the second-oldest (x=22, age 6) is inside the cap: alpha 0.897 -> b=229,g=119,r=64
+    expect(pixel(bytes, width, 22, 56)).toEqual([229, 119, 64, 255]);
+
+    const bytesSix = new Uint8Array(width * height * 4);
+    const paintedSix = composeInteractionTimeline(bytesSix, width, height, clicks.slice(1), 1_007);
+    expect(paintedSeven).toBe(paintedSix);
+  });
+
+  it('paints nothing (and never throws) when no geometry is available', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    expect(composeInteractionTimeline(bytes, WIDTH, HEIGHT, [], 1_000)).toBe(0);
+    expect(
+      composeInteractionTimeline(
+        bytes,
+        WIDTH,
+        HEIGHT,
+        [
+          { ts: 1_000, kind: 'click', ok: true, detail: { aspect: 'no-geometry' } },
+          { ts: 2_000, kind: 'render', ok: true, detail: { rect: { x: 1, y: 1, width: 2, height: 2 } } },
+        ],
+        3_000
+      )
+    ).toBe(0);
+    expect(bytes.every((byte) => byte === 0)).toBe(true);
   });
 });
 

@@ -99,6 +99,20 @@ const DEFAULT_CURSOR_SCALE = 1.5;
 const DEFAULT_CURSOR_OUTLINE_WIDTH = 2;
 const DEFAULT_CURSOR_FILL: RgbColor = { r: 255, g: 255, b: 255 };
 const DEFAULT_CURSOR_OUTLINE: RgbColor = { r: 0, g: 0, b: 0 };
+const DEFAULT_RIPPLE_START_RADIUS = 6;
+const DEFAULT_RIPPLE_END_RADIUS = 44;
+const DEFAULT_RIPPLE_STROKE_WIDTH = 3.5;
+const DEFAULT_RIPPLE_COLOR: RgbColor = { r: 71, g: 133, b: 255 };
+const DEFAULT_RIPPLE_STRENGTH = 0.9;
+const SNAP_GAP_MS = 1_200;
+const MIN_TRAVEL_MS = 1_000;
+const MAX_TRAVEL_MS = 1_500;
+
+/** How long one click ripple lives (ms) before it has fully vanished. */
+export const RIPPLE_LIFE_MS = 1_800;
+/** At most this many ripples are drawn per frame (the newest win). */
+export const MAX_RIPPLES = 6;
+
 const HIGHLIGHT_TRUTHY_VALUES: ReadonlySet<string> = new Set(['1', 'true', 'yes', 'on']);
 
 /**
@@ -245,7 +259,11 @@ export function findLatestInteraction(events: readonly ActionEvent[]): Interacti
 /** Recorded interaction geometry + purpose, replayed by the frame overlay. */
 export interface RecordedInteraction {
   rect: WidgetRect;
+  /** The rect centre: where the framework clicked. */
+  point: Point;
   purpose: HighlightPurpose;
+  /** `Date.now()` of the action, used to time cursor travel and ripples. */
+  ts: number;
 }
 
 /**
@@ -264,7 +282,7 @@ export function findRecordedInteractionAt(
     if (!INTERACTIVE_KINDS.has(event.kind)) continue;
     const rect = parseDetailRect(event.detail);
     if (rect === null) return null;
-    return { rect, purpose: purposeForKind(event.kind) };
+    return { rect, point: rectCenter(rect), purpose: purposeForKind(event.kind), ts: event.ts };
   }
   return null;
 }
@@ -637,7 +655,82 @@ export function composeCursorGlyph(
   return painted;
 }
 
-/** Layer order: target box, then click dot, then cursor on top. */
+/** Expanding-ring look for {@link composeRipple}; all fields default. */
+export interface ComposeRippleOptions {
+  /** Multiplier applied to both radii; default 1. */
+  scale?: number;
+  /** Ring radius at progress 0, before scaling; default 6. */
+  startRadius?: number;
+  /** Ring radius at progress 1, before scaling; default 44. */
+  endRadius?: number;
+  /** Stroke thickness in px; default 3.5. */
+  strokeWidth?: number;
+  /** Ring colour; default accent blue { r: 71, g: 133, b: 255 }. */
+  color?: RgbColor;
+  /** Peak alpha at progress 0, fading linearly to 0 at progress 1; default 0.9. */
+  strength?: number;
+}
+
+/**
+ * Paint one antialiased ripple ring centred on `point` IN PLACE. `progress` runs
+ * 0..1 (0 = just clicked, 1 = gone) and drives an ease-out radius from
+ * `startRadius` to `endRadius`. The stroke band is antialiased by coverage, so
+ * the ring fades in at its inner/outer edges. Progress at or outside the range
+ * paints nothing; coordinates are clamped to the frame; never throws.
+ */
+export function composeRipple(
+  bytes: Uint8Array,
+  width: number,
+  height: number,
+  point: Point,
+  progress: number,
+  options: ComposeRippleOptions = {}
+): number {
+  if (!frameUsable(bytes, width, height)) return 0;
+  if (!(progress > 0 && progress < 1)) return 0;
+  const scale = Math.max(0, options.scale ?? 1);
+  const startRadius = Math.max(0, (options.startRadius ?? DEFAULT_RIPPLE_START_RADIUS) * scale);
+  const endRadius = Math.max(startRadius, (options.endRadius ?? DEFAULT_RIPPLE_END_RADIUS) * scale);
+  const strokeWidth = Math.max(0, options.strokeWidth ?? DEFAULT_RIPPLE_STROKE_WIDTH);
+  const color = options.color ?? DEFAULT_RIPPLE_COLOR;
+  const strength = clampUnit(options.strength ?? DEFAULT_RIPPLE_STRENGTH);
+  const alpha = strength * (1 - progress);
+  if (alpha <= 0) return 0;
+
+  const eased = 1 - Math.pow(1 - progress, 3);
+  const radius = startRadius + (endRadius - startRadius) * eased;
+  const half = strokeWidth / 2;
+  const outer = radius + half;
+  const inner = radius - half;
+  const centerX = Math.round(point.x);
+  const centerY = Math.round(point.y);
+  const minX = Math.max(0, Math.floor(centerX - outer - 1));
+  const maxX = Math.min(width - 1, Math.ceil(centerX + outer + 1));
+  const minY = Math.max(0, Math.floor(centerY - outer - 1));
+  const maxY = Math.min(height - 1, Math.ceil(centerY + outer + 1));
+
+  let painted = 0;
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const distance = Math.hypot(px - centerX, py - centerY);
+      const coverage = clampUnit(outer + 0.5 - distance) * clampUnit(distance - (inner - 0.5));
+      if (coverage <= 0) continue;
+      if (
+        blendRgba(bytes, width, height, px, py, {
+          r: color.r,
+          g: color.g,
+          b: color.b,
+          a: alpha * coverage,
+        })
+      ) {
+        painted += 1;
+      }
+    }
+  }
+  return painted;
+}
+
+/** Layer order: target box, then ripples, then click dot, then cursor on top. */
 const DEFAULT_OVERLAY_BOX: ComposeTargetBoxOptions = {
   stroke: DEFAULT_TARGET_BOX_STROKE,
   thickness: DEFAULT_TARGET_BOX_THICKNESS,
@@ -671,5 +764,132 @@ export function composeInteractionOverlay(
     painted += composeClickDot(bytes, width, height, point, options.dot ?? {});
     painted += composeCursorGlyph(bytes, width, height, point, options.cursor ?? {});
   }
+  return painted;
+}
+
+/** The interaction timeline a frame is drawn from: the geometry-bearing action */
+/** that had already happened at the frame time (`current`) and the one before it. */
+export interface RecordedTimeline {
+  current: RecordedInteraction | null;
+  previous: RecordedInteraction | null;
+}
+
+/**
+ * Answer the current + previous successful interactive actions WITH recorded
+ * geometry at or before `at`. Geometry-less interactions are skipped (they
+ * cannot be drawn), unlike {@link findRecordedInteractionAt} which stops at the
+ * newest interactive action. Pure function of the log and the frame time.
+ */
+export function findRecordedTimelineAt(
+  events: readonly ActionEvent[],
+  at: number
+): RecordedTimeline {
+  let current: RecordedInteraction | null = null;
+  let previous: RecordedInteraction | null = null;
+  for (const event of events) {
+    if (event.ok === false || event.ts > at) continue;
+    if (!INTERACTIVE_KINDS.has(event.kind)) continue;
+    const rect = parseDetailRect(event.detail);
+    if (rect === null) continue;
+    previous = current;
+    current = { rect, point: rectCenter(rect), purpose: purposeForKind(event.kind), ts: event.ts };
+  }
+  return { current, previous };
+}
+
+/** Per-layer overrides for {@link composeInteractionTimeline}. */
+export interface ComposeInteractionTimelineOptions {
+  box?: ComposeTargetBoxOptions;
+  dot?: ComposeClickDotOptions;
+  cursor?: ComposeCursorGlyphOptions;
+  ripple?: ComposeRippleOptions;
+}
+
+function easeInOutCubic(u: number): number {
+  return u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+}
+
+/**
+ * Where the cursor is drawn for the frame at `at`: a pointer eased from the
+ * previous click point to the current one. With no previous interaction, or a
+ * gap longer than 1.2 s, it snaps to (and holds at) the current point. Travel
+ * begins at the previous interaction and takes clamp(gap, 1000, 1500) ms, so it
+ * can continue for a few frames after the current click lands.
+ */
+function travelPoint(
+  current: RecordedInteraction,
+  previous: RecordedInteraction | null,
+  at: number
+): Point {
+  if (previous === null) return current.point;
+  const gap = current.ts - previous.ts;
+  if (gap > SNAP_GAP_MS) return current.point;
+  const duration = clamp(gap, MIN_TRAVEL_MS, MAX_TRAVEL_MS);
+  const eased = easeInOutCubic(clampUnit((at - current.ts + gap) / duration));
+  return {
+    x: previous.point.x + (current.point.x - previous.point.x) * eased,
+    y: previous.point.y + (current.point.y - previous.point.y) * eased,
+  };
+}
+
+interface ActiveRipple {
+  point: Point;
+  progress: number;
+}
+
+/** The newest active click ripples at `at`, oldest first (so newest draws last). */
+function activeRipples(events: readonly ActionEvent[], at: number): ActiveRipple[] {
+  const active: ActiveRipple[] = [];
+  for (const event of events) {
+    if (event.ok === false || event.kind !== 'click') continue;
+    const age = at - event.ts;
+    if (age < 0 || age >= RIPPLE_LIFE_MS) continue;
+    const rect = parseDetailRect(event.detail);
+    if (rect === null) continue;
+    active.push({ point: rectCenter(rect), progress: age / RIPPLE_LIFE_MS });
+  }
+  return active.slice(-MAX_RIPPLES);
+}
+
+/**
+ * Bake the time-based interaction overlay for the frame captured at `at` IN
+ * PLACE: the current target box, one expanding ripple per recent click, the
+ * click dot at the current point, and a cursor glyph travelling from the
+ * previous click point to the current one. Pure function of `(events, at)` — no
+ * per-frame state. Paints 0 (frame untouched) when no recorded geometry exists;
+ * coordinates are clamped; never throws.
+ */
+export function composeInteractionTimeline(
+  bytes: Uint8Array,
+  width: number,
+  height: number,
+  events: readonly ActionEvent[],
+  at: number,
+  options: ComposeInteractionTimelineOptions = {}
+): number {
+  const { current, previous } = findRecordedTimelineAt(events, at);
+  if (current === null) return 0;
+  let painted = composeTargetBox(bytes, width, height, current.rect, {
+    ...DEFAULT_OVERLAY_BOX,
+    ...(options.box ?? {}),
+  });
+  for (const ripple of activeRipples(events, at)) {
+    painted += composeRipple(
+      bytes,
+      width,
+      height,
+      ripple.point,
+      ripple.progress,
+      options.ripple ?? {}
+    );
+  }
+  painted += composeClickDot(bytes, width, height, current.point, options.dot ?? {});
+  painted += composeCursorGlyph(
+    bytes,
+    width,
+    height,
+    travelPoint(current, previous, at),
+    options.cursor ?? {}
+  );
   return painted;
 }
