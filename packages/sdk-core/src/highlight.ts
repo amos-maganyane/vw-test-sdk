@@ -21,6 +21,7 @@
  */
 
 import type { ActionEvent } from './actionLog.js';
+import { drawText, measureText } from './font.js';
 import { quoteSmalltalkString } from './smalltalk.js';
 
 /** Semantic purpose → border colour. Mirrors the bridge legend, tuned for contrast. */
@@ -730,6 +731,213 @@ export function composeRipple(
   return painted;
 }
 
+/** Corner of the frame the label chip is pinned to. */
+export type LabelAnchor = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
+
+/** Per-call look overrides for {@link composeLabel}; every field defaults. */
+export interface ComposeLabelOptions {
+  /** Frame corner the chip is pinned to; default `top-right`. */
+  anchor?: LabelAnchor;
+  /** Integer pixels per font pixel; default 2 (a ~10x14 px glyph). */
+  scale?: number;
+  /** Max chip width in px; default 60% of the frame width. */
+  maxWidth?: number;
+  /** Interior padding around the text in px; default 6. */
+  padding?: number;
+  /** Gap between the chip and the frame edge in px; default 8. */
+  inset?: number;
+  /** Corner radius in px; default 6. */
+  radius?: number;
+  /** Chip fill; default rgba(0,0,0,0.65). */
+  background?: RgbaColor;
+  /** Chip border; default rgba(255,255,255,0.18); `null` disables the border. */
+  border?: RgbaColor | null;
+  /** Text colour; default white. */
+  text?: RgbColor;
+  /** Opacity multiplier 0..1 applied to every layer; default 1 (used to fade). */
+  alpha?: number;
+}
+
+/** How long a label is held at full opacity after its action (ms). */
+export const LABEL_HOLD_MS = 1_600;
+/** How long the held label then fades out (ms); the last 25% of its 2 s life. */
+export const LABEL_FADE_MS = 400;
+
+const DEFAULT_LABEL_SCALE = 2;
+const DEFAULT_LABEL_PADDING = 6;
+const DEFAULT_LABEL_INSET = 8;
+const DEFAULT_LABEL_RADIUS = 6;
+const DEFAULT_LABEL_MAX_WIDTH_RATIO = 0.6;
+const DEFAULT_LABEL_BACKGROUND: RgbaColor = { r: 0, g: 0, b: 0, a: 0.65 };
+const DEFAULT_LABEL_BORDER: RgbaColor = { r: 255, g: 255, b: 255, a: 0.18 };
+const DEFAULT_LABEL_TEXT: RgbColor = { r: 255, g: 255, b: 255 };
+const LABEL_ELLIPSIS = '...';
+const MAX_ASPECT_NAME_LENGTH = 64;
+
+/** Safe verb per framework action kind (values are never read). */
+const ACTION_VERBS: ReadonlyMap<string, string> = new Map([
+  ['click', 'Click'],
+  ['fill', 'Fill'],
+  ['type', 'Fill'],
+  ['selectRow', 'Select'],
+  ['selectListByIndex', 'Select'],
+  ['selectCombo', 'Select'],
+  ['setDatasetCell', 'Set cell'],
+]);
+
+/**
+ * The label an action event may safely show: a verb plus the widget aspect,
+ * never an entered value or raw business text. Answers null when the event
+ * carries nothing safe to show (e.g. a missing kind).
+ */
+export function semanticActionLabel(event: ActionEvent): string | null {
+  const kind = event.kind;
+  if (typeof kind !== 'string' || kind.trim().length === 0) return null;
+  if (kind === 'menuClick') return 'Click menu';
+  const aspect = safeAspectName(event.detail);
+  const verb = ACTION_VERBS.get(kind) ?? kind.charAt(0).toUpperCase() + kind.slice(1);
+  return aspect === null ? verb : `${verb} ${aspect}`;
+}
+
+/** A trimmed, single-spaced, length-capped aspect name; null when unusable. */
+function safeAspectName(detail: Record<string, unknown> | undefined): string | null {
+  if (detail === undefined) return null;
+  const raw = detail['aspect'];
+  if (typeof raw !== 'string') return null;
+  const aspect = raw.trim().replace(/\s+/g, ' ');
+  if (aspect.length === 0) return null;
+  return aspect.length > MAX_ASPECT_NAME_LENGTH ? aspect.slice(0, MAX_ASPECT_NAME_LENGTH) : aspect;
+}
+
+/** Longest prefix of `text` that fits with a trailing `...`, or '' when even that does not. */
+function fitLabelText(text: string, maxTextWidth: number, scale: number): string {
+  if (measureText(text, scale).width <= maxTextWidth) return text;
+  if (measureText(LABEL_ELLIPSIS, scale).width > maxTextWidth) return '';
+  let fitted = LABEL_ELLIPSIS;
+  for (let length = 1; length < text.length; length += 1) {
+    const candidate = `${text.slice(0, length)}${LABEL_ELLIPSIS}`;
+    if (measureText(candidate, scale).width > maxTextWidth) break;
+    fitted = candidate;
+  }
+  return fitted;
+}
+
+/** True when (px, py) lies inside the rounded rectangle at (x, y, w, h). */
+function insideRoundedRect(
+  px: number,
+  py: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): boolean {
+  if (w <= 0 || h <= 0) return false;
+  if (px < x || py < y || px >= x + w || py >= y + h) return false;
+  const radius = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  const cornerX = px < x + radius ? x + radius : px > x + w - radius ? x + w - radius : px;
+  const cornerY = py < y + radius ? y + radius : py > y + h - radius ? y + h - radius : py;
+  const dx = px - cornerX;
+  const dy = py - cornerY;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
+/**
+ * Paint a small action-label chip into a raw BGRA frame IN PLACE: a rounded
+ * rect (default radius 6) filled with translucent black, a translucent white
+ * border, and white bitmap text via {@link drawText}. The chip is anchored to a
+ * frame corner (default top-right, inset 8) and clamped fully inside the frame.
+ * Text longer than `maxWidth` (default 60% of the frame width) is truncated with
+ * `...`; empty text — or text that cannot fit even truncated — paints nothing and
+ * answers 0. Coordinates are clamped; never throws.
+ */
+export function composeLabel(
+  bytes: Uint8Array,
+  width: number,
+  height: number,
+  text: string,
+  options: ComposeLabelOptions = {}
+): number {
+  if (!frameUsable(bytes, width, height)) return 0;
+  if (typeof text !== 'string' || text.length === 0) return 0;
+  const alpha = clampUnit(options.alpha ?? 1);
+  if (alpha <= 0) return 0;
+  const scale = Math.max(1, Math.round(options.scale ?? DEFAULT_LABEL_SCALE));
+  const padding = Math.max(0, Math.round(options.padding ?? DEFAULT_LABEL_PADDING));
+  const inset = Math.max(0, Math.round(options.inset ?? DEFAULT_LABEL_INSET));
+  const radius = Math.max(0, Math.round(options.radius ?? DEFAULT_LABEL_RADIUS));
+  const maxWidth = Math.max(0, options.maxWidth ?? width * DEFAULT_LABEL_MAX_WIDTH_RATIO);
+  const fitted = fitLabelText(text, Math.max(0, maxWidth - 2 * padding), scale);
+  if (fitted.length === 0) return 0;
+
+  const textSize = measureText(fitted, scale);
+  const boxWidth = textSize.width + 2 * padding;
+  const boxHeight = textSize.height + 2 * padding;
+  const anchor = options.anchor ?? 'top-right';
+  const rawX =
+    anchor === 'top-right' || anchor === 'bottom-right' ? width - inset - boxWidth : inset;
+  const rawY =
+    anchor === 'bottom-right' || anchor === 'bottom-left' ? height - inset - boxHeight : inset;
+  const x0 = clamp(Math.round(rawX), 0, Math.max(0, width - boxWidth));
+  const y0 = clamp(Math.round(rawY), 0, Math.max(0, height - boxHeight));
+  const x1 = x0 + boxWidth;
+  const y1 = y0 + boxHeight;
+  const corner = Math.min(radius, Math.floor(Math.min(boxWidth, boxHeight) / 2));
+
+  const background = options.background ?? DEFAULT_LABEL_BACKGROUND;
+  const backgroundFill: RgbaColor = {
+    r: background.r,
+    g: background.g,
+    b: background.b,
+    a: clampUnit(background.a) * alpha,
+  };
+  const borderOption = options.border === undefined ? DEFAULT_LABEL_BORDER : options.border;
+  const borderFill: RgbaColor | null =
+    borderOption === null
+      ? null
+      : {
+          r: borderOption.r,
+          g: borderOption.g,
+          b: borderOption.b,
+          a: clampUnit(borderOption.a) * alpha,
+        };
+
+  let painted = 0;
+  for (let py = y0; py < y1; py += 1) {
+    for (let px = x0; px < x1; px += 1) {
+      if (!insideRoundedRect(px + 0.5, py + 0.5, x0, y0, boxWidth, boxHeight, corner)) continue;
+      const inBorder =
+        borderFill !== null &&
+        !insideRoundedRect(
+          px + 0.5,
+          py + 0.5,
+          x0 + 1,
+          y0 + 1,
+          boxWidth - 2,
+          boxHeight - 2,
+          corner - 1
+        );
+      if (inBorder && borderFill !== null) {
+        if (blendRgba(bytes, width, height, px, py, borderFill)) painted += 1;
+      } else if (blendRgba(bytes, width, height, px, py, backgroundFill)) {
+        painted += 1;
+      }
+    }
+  }
+  const textColor = options.text ?? DEFAULT_LABEL_TEXT;
+  painted += drawText(
+    bytes,
+    width,
+    height,
+    x0 + padding,
+    y0 + padding,
+    fitted,
+    { r: textColor.r, g: textColor.g, b: textColor.b, a: alpha },
+    scale
+  );
+  return painted;
+}
+
 /** Layer order: target box, then ripples, then click dot, then cursor on top. */
 const DEFAULT_OVERLAY_BOX: ComposeTargetBoxOptions = {
   stroke: DEFAULT_TARGET_BOX_STROKE,
@@ -851,13 +1059,47 @@ function activeRipples(events: readonly ActionEvent[], at: number): ActiveRipple
   return active.slice(-MAX_RIPPLES);
 }
 
+/** The label shown for the current action: its text and the action's timestamp. */
+interface CurrentLabel {
+  text: string;
+  ts: number;
+}
+
+/**
+ * The safe semantic label for the newest geometry-bearing interactive action at
+ * or before `at` — the same event {@link findRecordedTimelineAt} calls `current`.
+ * Answers null when that action records no geometry or nothing safe to show.
+ */
+function currentLabelAt(events: readonly ActionEvent[], at: number): CurrentLabel | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event === undefined || event.ok === false || event.ts > at) continue;
+    if (!INTERACTIVE_KINDS.has(event.kind)) continue;
+    if (parseDetailRect(event.detail) === null) continue;
+    const text = semanticActionLabel(event);
+    return text === null ? null : { text, ts: event.ts };
+  }
+  return null;
+}
+
+/** Label opacity for an action age: 1 while held, linear fade, then 0. */
+function labelAlphaForAge(ageMs: number): number {
+  if (ageMs < 0) return 0;
+  if (ageMs <= LABEL_HOLD_MS) return 1;
+  if (ageMs >= LABEL_HOLD_MS + LABEL_FADE_MS) return 0;
+  return 1 - (ageMs - LABEL_HOLD_MS) / LABEL_FADE_MS;
+}
+
 /**
  * Bake the time-based interaction overlay for the frame captured at `at` IN
  * PLACE: the current target box, one expanding ripple per recent click, the
- * click dot at the current point, and a cursor glyph travelling from the
- * previous click point to the current one. Pure function of `(events, at)` — no
- * per-frame state. Paints 0 (frame untouched) when no recorded geometry exists;
- * coordinates are clamped; never throws.
+ * click dot at the current point, a cursor glyph travelling from the previous
+ * click point to the current one, and the current action's semantic label on
+ * top. The label is held at full opacity for {@link LABEL_HOLD_MS} after its
+ * action, fades over {@link LABEL_FADE_MS}, then disappears; it never contains
+ * an entered value. Pure function of `(events, at)` — no per-frame state. Paints
+ * 0 (frame untouched) when no recorded geometry exists; coordinates are clamped;
+ * never throws.
  */
 export function composeInteractionTimeline(
   bytes: Uint8Array,
@@ -891,5 +1133,12 @@ export function composeInteractionTimeline(
     travelPoint(current, previous, at),
     options.cursor ?? {}
   );
+  const label = currentLabelAt(events, at);
+  if (label !== null) {
+    const alpha = labelAlphaForAge(at - label.ts);
+    if (alpha > 0) {
+      painted += composeLabel(bytes, width, height, label.text, { alpha });
+    }
+  }
   return painted;
 }

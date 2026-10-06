@@ -6,6 +6,7 @@ import {
   composeHighlightBorder,
   composeInteractionOverlay,
   composeInteractionTimeline,
+  composeLabel,
   composeRipple,
   composeTargetBox,
   findLatestInteraction,
@@ -13,7 +14,10 @@ import {
   findRecordedTimelineAt,
   highlightColorForPurpose,
   isHighlightEnabled,
+  LABEL_FADE_MS,
+  LABEL_HOLD_MS,
   parseWidgetRect,
+  semanticActionLabel,
 } from '../src/highlight.js';
 import type { ActionEvent } from '../src/actionLog.js';
 import { VWTestClient } from '../src/client.js';
@@ -608,5 +612,239 @@ describe('isHighlightEnabled', () => {
     expect(isHighlightEnabled({ VW_HIGHLIGHT: '0' })).toBe(false);
     expect(isHighlightEnabled({ VW_HIGHLIGHT: 'banana' })).toBe(false);
     expect(isHighlightEnabled({})).toBe(false);
+  });
+});
+
+describe('composeLabel', () => {
+  const WIDTH = 400;
+  const HEIGHT = 200;
+
+  function pixel(bytes: Uint8Array, x: number, y: number): number[] {
+    const i = (y * WIDTH + x) * 4;
+    return [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+  }
+
+  /** True when any pixel in the band is opaque white (a text pixel). */
+  function hasWhitePixel(bytes: Uint8Array, x0: number, y0: number, x1: number, y1: number): boolean {
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) {
+        const p = pixel(bytes, x, y);
+        if (p[0] === 255 && p[1] === 255 && p[2] === 255 && p[3] === 255) return true;
+      }
+    }
+    return false;
+  }
+
+  it('paints the rounded background, border and white text', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    const painted = composeLabel(bytes, WIDTH, HEIGHT, 'Click Search');
+    expect(painted).toBeGreaterThan(0);
+    // "Click Search" = 12 chars -> 142 px text at scale 2; chip = 154x26, inset 8
+    const x0 = WIDTH - 8 - 154;
+    const y0 = 8;
+    // interior: rgba(0,0,0,0.65) over transparent black -> opaque black
+    expect(pixel(bytes, x0 + 3, y0 + 13)).toEqual([0, 0, 0, 255]);
+    // left border: rgba(255,255,255,0.18) -> round(255*0.18) = 46
+    expect(pixel(bytes, x0, y0 + 13)).toEqual([46, 46, 46, 255]);
+    // text band carries at least one opaque white glyph pixel
+    expect(hasWhitePixel(bytes, x0 + 6, y0 + 6, x0 + 148, y0 + 20)).toBe(true);
+  });
+
+  it('truncates text past the max width and keeps the chip inside it', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    composeLabel(bytes, WIDTH, HEIGHT, 'This action label is far too long to fit inside the chip', {
+      maxWidth: 120,
+    });
+    // longest prefix that fits with "..." is "This a..." (106 px text) -> chip 118x26
+    const x0 = WIDTH - 8 - 118;
+    expect(pixel(bytes, x0, 21)).toEqual([46, 46, 46, 255]);
+    expect(pixel(bytes, x0 - 1, 21)).toEqual([0, 0, 0, 0]);
+    expect(hasWhitePixel(bytes, x0 + 6, 14, x0 + 112, 28)).toBe(true);
+  });
+
+  it('clamps the chip fully inside the frame', () => {
+    const width = 60;
+    const height = 30;
+    const bytes = new Uint8Array(width * height * 4);
+    // "OK" -> 22 px text; chip 34x26; top-right x = 60-8-34 = 18, y clamps 8 -> 4
+    expect(composeLabel(bytes, width, height, 'OK')).toBeGreaterThan(0);
+    const at = (x: number, y: number): number[] => {
+      const i = (y * width + x) * 4;
+      return [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+    };
+    expect(at(18, 4 + 13)).toEqual([46, 46, 46, 255]);
+    expect(at(18, 3)).toEqual([0, 0, 0, 0]);
+    // the chip's bottom edge is inside the frame at the straight mid-section
+    // (x = 18 + 34/2 = 35); the rounded corner at (18, 29) is correctly cut out
+    expect(at(35, 29)).toEqual([46, 46, 46, 255]);
+    expect(at(18, 29)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('anchors to each corner of the frame', () => {
+    const cases = [
+      ['top-left', 8, 8],
+      ['top-right', WIDTH - 8 - 34, 8],
+      ['bottom-left', 8, HEIGHT - 8 - 26],
+      ['bottom-right', WIDTH - 8 - 34, HEIGHT - 8 - 26],
+    ] as const;
+    for (const [anchor, x0, y0] of cases) {
+      const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+      composeLabel(bytes, WIDTH, HEIGHT, 'OK', { anchor });
+      expect(pixel(bytes, x0, y0 + 13)).toEqual([46, 46, 46, 255]);
+    }
+  });
+
+  it('paints nothing for empty text', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    expect(composeLabel(bytes, WIDTH, HEIGHT, '')).toBe(0);
+    expect(bytes.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it('scales every layer by the alpha option', () => {
+    const transparent = new Uint8Array(WIDTH * HEIGHT * 4);
+    expect(composeLabel(transparent, WIDTH, HEIGHT, 'OK', { alpha: 0 })).toBe(0);
+    expect(transparent.every((byte) => byte === 0)).toBe(true);
+
+    const half = new Uint8Array(WIDTH * HEIGHT * 4);
+    composeLabel(half, WIDTH, HEIGHT, 'OK', { alpha: 0.5 });
+    const x0 = WIDTH - 8 - 34;
+    // border: round(255 * 0.18 * 0.5) = 23
+    expect(pixel(half, x0, 8 + 13)).toEqual([23, 23, 23, 255]);
+  });
+});
+
+describe('semanticActionLabel', () => {
+  it('maps a click to its verb plus the aspect', () => {
+    expect(
+      semanticActionLabel({ ts: 1, kind: 'click', ok: true, detail: { aspect: 'Search' } })
+    ).toBe('Click Search');
+  });
+
+  it('never includes a raw entered value', () => {
+    const label = semanticActionLabel({
+      ts: 1,
+      kind: 'fill',
+      ok: true,
+      detail: { aspect: 'txtSearch', value: 'PROJ-123' },
+    });
+    expect(label).toBe('Fill txtSearch');
+    expect(label).not.toContain('PROJ-123');
+  });
+
+  it('maps the framework action kinds to safe verbs', () => {
+    expect(semanticActionLabel({ ts: 1, kind: 'type', detail: { aspect: 'a' } })).toBe('Fill a');
+    expect(semanticActionLabel({ ts: 1, kind: 'selectRow', detail: { aspect: 'grid' } })).toBe(
+      'Select grid'
+    );
+    expect(semanticActionLabel({ ts: 1, kind: 'selectListByIndex', detail: { aspect: 'list' } })).toBe(
+      'Select list'
+    );
+    expect(semanticActionLabel({ ts: 1, kind: 'setDatasetCell', detail: { aspect: 'table' } })).toBe(
+      'Set cell table'
+    );
+    expect(semanticActionLabel({ ts: 1, kind: 'selectCombo', detail: { aspect: 'fund' } })).toBe(
+      'Select fund'
+    );
+    expect(
+      semanticActionLabel({ ts: 1, kind: 'menuClick', detail: { path: 'Party & Contract' } })
+    ).toBe('Click menu');
+  });
+
+  it('falls back to the capitalised kind when there is no aspect', () => {
+    expect(semanticActionLabel({ ts: 1, kind: 'dblclick' })).toBe('Dblclick');
+    expect(semanticActionLabel({ ts: 1, kind: 'click' })).toBe('Click');
+  });
+
+  it('ignores a non-string or blank aspect', () => {
+    expect(semanticActionLabel({ ts: 1, kind: 'click', detail: { aspect: 42 } })).toBe('Click');
+    expect(semanticActionLabel({ ts: 1, kind: 'click', detail: { aspect: '   ' } })).toBe('Click');
+  });
+
+  it('answers null when there is nothing safe to show', () => {
+    expect(semanticActionLabel({ ts: 1, kind: '' })).toBeNull();
+  });
+});
+
+describe('composeInteractionTimeline action label', () => {
+  const WIDTH = 400;
+  const HEIGHT = 200;
+
+  function pixel(bytes: Uint8Array, x: number, y: number): number[] {
+    const i = (y * WIDTH + x) * 4;
+    return [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+  }
+
+  const clickEvent = (ts: number): ActionEvent => ({
+    ts,
+    kind: 'click',
+    ok: true,
+    detail: {
+      aspect: 'Search',
+      value: 'PROJ-123',
+      rect: { x: 20, y: 80, width: 60, height: 24 },
+    },
+  });
+
+  it('draws the semantic label for the current action after a click', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    const painted = composeInteractionTimeline(bytes, WIDTH, HEIGHT, [clickEvent(1_000)], 1_100);
+    expect(painted).toBeGreaterThan(0);
+    // "Click Search" -> chip 154x26 anchored top-right, inset 8
+    const x0 = WIDTH - 8 - 154;
+    expect(pixel(bytes, x0, 8 + 13)).toEqual([46, 46, 46, 255]);
+    expect(pixel(bytes, x0 + 3, 8 + 13)).toEqual([0, 0, 0, 255]);
+    let sawWhite = false;
+    for (let y = 14; y < 28 && !sawWhite; y += 1) {
+      for (let x = x0 + 6; x < x0 + 148; x += 1) {
+        const p = pixel(bytes, x, y);
+        if (p[0] === 255 && p[1] === 255 && p[2] === 255 && p[3] === 255) {
+          sawWhite = true;
+          break;
+        }
+      }
+    }
+    expect(sawWhite).toBe(true);
+  });
+
+  it('fades the label over the last 400 ms of its life and then drops it', () => {
+    const faded = new Uint8Array(WIDTH * HEIGHT * 4);
+    composeInteractionTimeline(
+      faded,
+      WIDTH,
+      HEIGHT,
+      [clickEvent(1_000)],
+      1_000 + LABEL_HOLD_MS + LABEL_FADE_MS / 2
+    );
+    // border at half alpha: round(255 * 0.18 * 0.5) = 23
+    expect(pixel(faded, WIDTH - 8 - 154, 21)).toEqual([23, 23, 23, 255]);
+
+    const expired = new Uint8Array(WIDTH * HEIGHT * 4);
+    composeInteractionTimeline(
+      expired,
+      WIDTH,
+      HEIGHT,
+      [clickEvent(1_000)],
+      1_000 + LABEL_HOLD_MS + LABEL_FADE_MS
+    );
+    expect(pixel(expired, WIDTH - 8 - 154, 21)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('skips the label when even a truncated label cannot fit the frame', () => {
+    const bytes = new Uint8Array(64 * 64 * 4);
+    const event: ActionEvent = {
+      ts: 1_000,
+      kind: 'click',
+      ok: true,
+      detail: { aspect: 'Search', rect: { x: 10, y: 20, width: 20, height: 20 } },
+    };
+    expect(composeInteractionTimeline(bytes, 64, 64, [event], 1_100)).toBeGreaterThan(0);
+    // (55,10) is the top-right chip area; nothing else reaches it
+    const i = (10 * 64 + 55) * 4;
+    expect([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]).toEqual([0, 0, 0, 0]);
+  });
+
+  it('exposes the label lifetime constants', () => {
+    expect(LABEL_HOLD_MS).toBe(1_600);
+    expect(LABEL_FADE_MS).toBe(400);
   });
 });

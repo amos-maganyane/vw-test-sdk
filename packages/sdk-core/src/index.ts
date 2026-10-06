@@ -63,6 +63,7 @@ export {
   composeClickDot,
   composeCursorGlyph,
   composeRipple,
+  composeLabel,
   composeInteractionOverlay,
   composeInteractionTimeline,
   highlightColorForPurpose,
@@ -70,14 +71,18 @@ export {
   findLatestInteraction,
   findRecordedInteractionAt,
   findRecordedTimelineAt,
+  semanticActionLabel,
   DEFAULT_HIGHLIGHT_THICKNESS,
   RIPPLE_LIFE_MS,
   MAX_RIPPLES,
+  LABEL_HOLD_MS,
+  LABEL_FADE_MS,
 } from './highlight.js';
 export type {
   ActionGeometry,
   ComposeClickDotOptions,
   ComposeCursorGlyphOptions,
+  ComposeLabelOptions,
   ComposeInteractionOverlayOptions,
   ComposeInteractionTimelineOptions,
   ComposeRippleOptions,
@@ -86,6 +91,7 @@ export type {
   HighlightRenderOptions,
   InteractionOverlay,
   InteractionTarget,
+  LabelAnchor,
   Point,
   RecordedInteraction,
   RecordedTimeline,
@@ -93,6 +99,19 @@ export type {
   RgbaColor,
   WidgetRect,
 } from './highlight.js';
+
+// Embedded bitmap font (action labels)
+export {
+  FONT_ADVANCE,
+  FONT_FIRST_CHAR,
+  FONT_GLYPH_HEIGHT,
+  FONT_GLYPH_WIDTH,
+  FONT_GLYPHS,
+  FONT_LAST_CHAR,
+  drawText,
+  measureText,
+} from './font.js';
+export type { FontGlyph, TextColor, TextMeasurement } from './font.js';
 
 // Action log
 export { ActionLog } from './actionLog.js';
