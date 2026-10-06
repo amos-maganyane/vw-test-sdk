@@ -604,7 +604,9 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
   private async runCapture(timeoutMs: number): Promise<void> {
     const run = (async (): Promise<void> => {
       try {
+        const t0 = Date.now();
         const window = await this.resolveRenderWindow();
+        const tResolve = Date.now();
         // Sampled before the request: that is the moment the bridge renders the
         // screen state this frame shows, and it anchors the frame's hold time.
         const sampledAt = Date.now();
@@ -615,6 +617,11 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
             source: this.renderSource,
           })
         );
+        if (TRUTHY_VALUES.has((process.env['VW_VIDEO_DEBUG'] ?? '').toLowerCase())) {
+          console.log(
+            `vw-test-sdk: capture resolve=${tResolve - t0}ms render=${Date.now() - tResolve}ms`
+          );
+        }
         const guard = inspectFrame(frame.bytes, frame.width, frame.height);
         if (!guard.clean) {
           // Strict (default) refuses an unproven frame. VW_VIDEO_GUARD=warn keeps it
@@ -805,7 +812,12 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
       return 'ffmpeg produced no output file';
     }
     await testInfo.attach('video.mp4', { path: outputPath, contentType: 'video/mp4' });
-    console.log(`vw-test-sdk: video attached (${this.paths.length} frame(s) @ ${this.effectiveFps().toFixed(2)} fps)`);
+    const firstOffset = this.times.length > 0 ? (this.times[0] - this.startedAt) / 1000 : 0;
+    const span = this.times.length > 0 ? ((this.stoppedAt ?? Date.now()) - this.times[0]) / 1000 : 0;
+    console.log(
+      `vw-test-sdk: video attached (${this.paths.length} frame(s) @ ${this.effectiveFps().toFixed(2)} fps, ` +
+        `first +${firstOffset.toFixed(1)}s, span ${span.toFixed(1)}s)`
+    );
     return undefined;
   }
 
