@@ -8,6 +8,7 @@
 
 import type { WidgetContext } from './context.js';
 import type { WaitOptions } from '../wait.js';
+import { resolveActionGeometry } from './widget.js';
 
 export class DialogScope {
   constructor(private readonly ctx: WidgetContext) {}
@@ -15,7 +16,8 @@ export class DialogScope {
   /** Click a named button (e.g. "OK", "Cancel") on the posted modal. */
   async respond(buttonLabel: string): Promise<void> {
     const title = await this.ctx.resolveTitle();
-    await this.ctx.client.clickWidget(buttonLabel, title);
+    const geometry = await resolveActionGeometry(this.ctx, buttonLabel, title);
+    await this.ctx.client.clickWidget(buttonLabel, title, geometry);
     this.ctx.invalidate();
   }
 

@@ -6,7 +6,7 @@
  * exposes a richer table-introspection endpoint.
  */
 
-import { WidgetHandle } from './widget.js';
+import { WidgetHandle, resolveActionGeometry } from './widget.js';
 import type { WaitOptions } from '../wait.js';
 
 export interface RowMatch {
@@ -18,7 +18,8 @@ export class TableHandle extends WidgetHandle {
   /** Edit one DataSet cell through the same column-model setter a user edit invokes. */
   async setCell(rowIndex: number, column: string, value: string): Promise<void> {
     const title = await this.ctx.resolveTitle();
-    await this.ctx.client.setDatasetCell(this.aspect, rowIndex, column, value, title);
+    const geometry = await resolveActionGeometry(this.ctx, this.aspect, title);
+    await this.ctx.client.setDatasetCell(this.aspect, rowIndex, column, value, title, geometry);
     this.ctx.invalidate();
   }
 

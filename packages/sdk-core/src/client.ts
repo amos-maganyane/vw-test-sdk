@@ -30,6 +30,7 @@ import {
   findLatestInteraction,
   highlightColorForPurpose,
   parseWidgetRect,
+  type ActionGeometry,
   type HighlightRenderOptions,
   type RgbColor,
   type WidgetRect,
@@ -226,21 +227,34 @@ export class VWTestClient {
   // Widget operations (used by WindowScope handles)
   // ---------------------------------------------------------------------------
 
-  /** POST /click. */
-  async clickWidget(aspect: string, windowTitle?: string, opts?: { double?: boolean }): Promise<void> {
+  /** POST /click. `opts.rect` is the action-time geometry the evidence overlay replays. */
+  async clickWidget(
+    aspect: string,
+    windowTitle?: string,
+    opts?: { double?: boolean } & ActionGeometry
+  ): Promise<void> {
     const body: Record<string, unknown> = { aspect };
     if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
     if (opts?.double === true) body['double'] = true;
     await this.bridge.postJson('/click', body);
-    this.record('click', { aspect, windowTitle, double: opts?.double === true });
+    const detail: Record<string, unknown> = { aspect, windowTitle, double: opts?.double === true };
+    addActionGeometry(detail, opts);
+    this.record('click', detail);
   }
 
   /** POST /type (direct value-set). */
-  async setWidgetValue(aspect: string, value: string, windowTitle?: string): Promise<void> {
+  async setWidgetValue(
+    aspect: string,
+    value: string,
+    windowTitle?: string,
+    geometry?: ActionGeometry
+  ): Promise<void> {
     const body: Record<string, unknown> = { aspect, value };
     if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
     await this.bridge.postJson('/type', body);
-    this.record('fill', { aspect, windowTitle });
+    const detail: Record<string, unknown> = { aspect, windowTitle };
+    addActionGeometry(detail, geometry);
+    this.record('fill', detail);
   }
 
   /** POST /set-dataset-cell through the DataSet column-model change path. */
@@ -249,20 +263,35 @@ export class VWTestClient {
     rowIndex: number,
     column: string,
     value: string,
-    windowTitle?: string
+    windowTitle?: string,
+    geometry?: ActionGeometry
   ): Promise<void> {
     const body: Record<string, unknown> = { aspect, rowIndex, column, value };
     if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
     await this.bridge.postJson('/set-dataset-cell', body);
-    this.record('setDatasetCell', { aspect, rowIndex, column, windowTitle });
+    const detail: Record<string, unknown> = { aspect, rowIndex, column, windowTitle };
+    addActionGeometry(detail, geometry);
+    this.record('setDatasetCell', detail);
   }
 
   /** Select the first list/DataSet row whose rendered content contains match. */
-  async selectRow(aspect: string, match: string, windowTitle?: string): Promise<SelectRowResult> {
+  async selectRow(
+    aspect: string,
+    match: string,
+    windowTitle?: string,
+    geometry?: ActionGeometry
+  ): Promise<SelectRowResult> {
     const body: Record<string, unknown> = { aspect, match };
     if (windowTitle !== undefined) body['windowTitle'] = windowTitle;
     const result = await this.bridge.postJson<SelectRowResult>('/select-row', body);
-    this.record('selectRow', { aspect, match, windowTitle, index: result.index });
+    const detail: Record<string, unknown> = {
+      aspect,
+      match,
+      windowTitle,
+      index: result.index,
+    };
+    addActionGeometry(detail, geometry);
+    this.record('selectRow', detail);
     return result;
   }
 
@@ -658,6 +687,17 @@ export class VWTestClient {
     }
     return resolveTokenFile(opts);
   }
+}
+
+/**
+ * Attach captured action geometry to an action detail, omitting it when the
+ * widget rectangle could not be resolved (or highlighting was disabled).
+ */
+function addActionGeometry(
+  detail: Record<string, unknown>,
+  geometry: ActionGeometry | undefined
+): void {
+  if (geometry?.rect !== undefined) detail['rect'] = geometry.rect;
 }
 
 /**

@@ -65,6 +65,11 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import {
+  composeInteractionOverlay,
+  findRecordedInteractionAt,
+  isHighlightEnabled,
+} from '@enviro365/vw-test-sdk-core';
 import type {
   ActionEvent,
   RenderOptions,
@@ -164,9 +169,10 @@ export interface VideoRecordingOptions {
    */
   targetWaitMs?: number;
   /**
-   * Composite a high-contrast border at the most recent widget interaction into
-   * every frame; default `VW_HIGHLIGHT` env (truthy). The border is painted into
-   * the frame buffer before PNG encoding, so it appears in the assembled video.
+   * Bake the recorded action overlay (target box + click dot + cursor) into
+   * every frame; default `VW_HIGHLIGHT` env (truthy). Geometry is captured at
+   * action time by the widget handles while this is enabled, and replayed per
+   * frame before PNG encoding, so it appears in the assembled video.
    */
   highlight?: boolean;
 }
@@ -611,11 +617,7 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
         // screen state this frame shows, and it anchors the frame's hold time.
         const sampledAt = Date.now();
         const frame = await this.vw.render(
-          renderOptionsFor(window, {
-            timeoutMs,
-            highlight: this.highlightEnabled,
-            source: this.renderSource,
-          })
+          renderOptionsFor(window, { timeoutMs, source: this.renderSource })
         );
         if (TRUTHY_VALUES.has((process.env['VW_VIDEO_DEBUG'] ?? '').toLowerCase())) {
           console.log(
@@ -633,6 +635,15 @@ class FrameRecorder implements VideoRecorder, RecordedVideo {
           }
           console.warn(
             `vw-test-sdk: frame kept despite content guard: ${guard.reason ?? 'unknown'} (VW_VIDEO_GUARD=warn)`
+          );
+        }
+        if (this.highlightEnabled) {
+          composeRecordedInteractionOverlay(
+            frame.bytes,
+            frame.width,
+            frame.height,
+            this.vw.getActionLog(),
+            sampledAt
           );
         }
         const png = encodeBgraToPng(frame.bytes, frame.width, frame.height);
@@ -973,7 +984,6 @@ function nonEmptyEnv(name: string): string | undefined {
 /** Per-frame request knobs (grouped: >3 fields, mirrors FrameRecorderConfig). */
 interface RenderCaptureSettings {
   timeoutMs: number;
-  highlight: boolean;
   source: RenderSource;
 }
 
@@ -985,13 +995,34 @@ function renderOptionsFor(window: RenderWindow, capture: RenderCaptureSettings):
   };
   if (window.windowTitle !== undefined) opts.windowTitle = window.windowTitle;
   if (window.appClass !== undefined) opts.appClass = window.appClass;
-  if (capture.highlight) opts.highlight = true;
   return opts;
+}
+
+/**
+ * Bake the recorded interaction overlay into one captured frame IN PLACE
+ * (target box + click dot + cursor). The most recent interactive action at or
+ * before `sampledAt` wins, replayed from the geometry it recorded at action
+ * time. Answers 0 — frame untouched — when no recorded geometry is available;
+ * a frame is never discarded.
+ */
+export function composeRecordedInteractionOverlay(
+  bytes: Uint8Array,
+  width: number,
+  height: number,
+  events: readonly ActionEvent[],
+  sampledAt: number
+): number {
+  const interaction = findRecordedInteractionAt(events, sampledAt);
+  if (interaction === null) return 0;
+  return composeInteractionOverlay(bytes, width, height, {
+    rect: interaction.rect,
+    purpose: interaction.purpose,
+  });
 }
 
 function resolveHighlightEnabled(opts: VideoRecordingOptions): boolean {
   if (opts.highlight !== undefined) return opts.highlight;
-  return TRUTHY_VALUES.has((process.env['VW_HIGHLIGHT'] ?? '').toLowerCase());
+  return isHighlightEnabled();
 }
 
 /**

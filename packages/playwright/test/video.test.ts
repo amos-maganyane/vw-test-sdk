@@ -10,6 +10,7 @@ import {
   buildFrameNormaliseArgs,
   buildFrameNormaliseFilterScript,
   computeCanvasSize,
+  composeRecordedInteractionOverlay,
   framesNeedNormalisation,
   resolveEncodeOptions,
   resolveVideoRetainPolicy,
@@ -20,7 +21,7 @@ import {
 } from '../src/video.js';
 import { buildConcatFile, computeFrameDurations } from '../src/frameTimeline.js';
 import type { AttachableTestInfo } from '../src/evidence.js';
-import type { VWTestClient } from '@enviro365/vw-test-sdk-core';
+import type { ActionEvent, VWTestClient } from '@enviro365/vw-test-sdk-core';
 
 const WINDOW = { title: 'MOMENTUM WEALTH', appClass: 'MasLauncher' };
 
@@ -802,6 +803,70 @@ describe('video render source', () => {
     expect(resolveVideoSource()).toBe('in-image');
     vi.stubEnv('VW_VIDEO_SOURCE', 'banana');
     expect(resolveVideoSource()).toBe('os');
+  });
+});
+
+describe('recorded interaction overlay', () => {
+  const WIDTH = 64;
+  const HEIGHT = 64;
+
+  function pixel(bytes: Uint8Array, x: number, y: number): number[] {
+    const i = (y * WIDTH + x) * 4;
+    return [bytes[i], bytes[i + 1], bytes[i + 2]];
+  }
+
+  it('bakes box, dot and cursor from the recorded geometry at the frame timestamp', () => {
+    const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+    const events: ActionEvent[] = [
+      {
+        ts: 1_000,
+        kind: 'click',
+        ok: true,
+        detail: { aspect: 'btnSearch', rect: { x: 8, y: 8, width: 20, height: 20 } },
+      },
+    ];
+    const painted = composeRecordedInteractionOverlay(bytes, WIDTH, HEIGHT, events, 2_000);
+    expect(painted).toBeGreaterThan(0);
+    // box stroke on the exact bbox (51 = #333)
+    expect(pixel(bytes, 8, 8)).toEqual([51, 51, 51]);
+    // click point is the rect centre (18,18): cursor tip white, dot over the fill left of it
+    expect(pixel(bytes, 18, 18)).toEqual([255, 255, 255]);
+    expect(pixel(bytes, 10, 18)).toEqual([11, 6, 179]);
+  });
+
+  it('ignores interactions recorded after the frame and logs without geometry', () => {
+    const bytes = new Uint8Array(16 * 16 * 4);
+    const future: ActionEvent[] = [
+      { ts: 5_000, kind: 'click', ok: true, detail: { rect: { x: 2, y: 2, width: 4, height: 4 } } },
+    ];
+    expect(composeRecordedInteractionOverlay(bytes, 16, 16, future, 1_000)).toBe(0);
+    expect(composeRecordedInteractionOverlay(bytes, 16, 16, [], 1_000)).toBe(0);
+    expect(bytes.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it('bakes frames without asking the client for a capture-time border', async () => {
+    vi.stubEnv('VW_VIDEO', '1');
+    vi.stubEnv('VW_VIDEO_FPS', '10');
+    vi.stubEnv('VW_HIGHLIGHT', '1');
+    const events: ActionEvent[] = [
+      {
+        ts: Date.now() - 500,
+        kind: 'click',
+        ok: true,
+        detail: { aspect: 'btnSearch', windowTitle: WINDOW.title, rect: { x: 4, y: 4, width: 12, height: 12 } },
+      },
+    ];
+    const vw = makeVw({ getActionLog: vi.fn(() => events) });
+    const recorder = startVideoRecording(vw)!;
+    await waitForFrames(recorder, 2);
+    const recording = await recorder.stop();
+
+    const renderCalls = vi
+      .mocked(vw.render)
+      .mock.calls.map(([opts]) => opts as Record<string, unknown>);
+    expect(renderCalls.length).toBeGreaterThanOrEqual(2);
+    expect(renderCalls.every((opts) => opts['highlight'] === undefined)).toBe(true);
+    await recording.discard();
   });
 });
 

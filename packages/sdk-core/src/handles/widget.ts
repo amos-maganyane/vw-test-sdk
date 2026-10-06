@@ -7,6 +7,7 @@
 import type { WidgetContext } from './context.js';
 import type { WidgetNode } from '../types.js';
 import type { VWTestClient } from '../client.js';
+import { isHighlightEnabled, type ActionGeometry } from '../highlight.js';
 
 /** Depth-first search for a widget node by its aspect (name or model). */
 export function findWidgetByAspect(node: WidgetNode, aspect: string): WidgetNode | null {
@@ -16,6 +17,26 @@ export function findWidgetByAspect(node: WidgetNode, aspect: string): WidgetNode
     if (found !== null) return found;
   }
   return null;
+}
+
+/**
+ * Resolve this widget's window-local rectangle ONCE at action time, so the
+ * evidence overlay replays recorded geometry instead of re-resolving it at
+ * capture time (dialogs move/resize). Undefined when highlighting is disabled
+ * (`VW_HIGHLIGHT` unset) or the widget cannot be located; never throws.
+ */
+export async function resolveActionGeometry(
+  ctx: WidgetContext,
+  aspect: string,
+  windowTitle: string
+): Promise<ActionGeometry | undefined> {
+  if (!isHighlightEnabled()) return undefined;
+  try {
+    const rect = await ctx.client.resolveWidgetRect(aspect, windowTitle);
+    return rect === null ? undefined : { rect };
+  } catch {
+    return undefined;
+  }
 }
 
 export class WidgetHandle {
@@ -32,21 +53,26 @@ export class WidgetHandle {
   /** Single click. */
   async click(): Promise<void> {
     const title = await this.ctx.resolveTitle();
-    await this.ctx.client.clickWidget(this.aspect, title);
+    const geometry = await resolveActionGeometry(this.ctx, this.aspect, title);
+    await this.ctx.client.clickWidget(this.aspect, title, geometry);
     this.ctx.invalidate();
   }
 
   /** Double click (bridge `double` flag). */
   async doubleClick(): Promise<void> {
     const title = await this.ctx.resolveTitle();
-    await this.ctx.client.clickWidget(this.aspect, title, { double: true });
+    const geometry = await resolveActionGeometry(this.ctx, this.aspect, title);
+    const opts: { double: boolean } & ActionGeometry =
+      geometry === undefined ? { double: true } : { double: true, ...geometry };
+    await this.ctx.client.clickWidget(this.aspect, title, opts);
     this.ctx.invalidate();
   }
 
   /** Direct value-set (the preferred, fast path). */
   async fill(value: string): Promise<void> {
     const title = await this.ctx.resolveTitle();
-    await this.ctx.client.setWidgetValue(this.aspect, value, title);
+    const geometry = await resolveActionGeometry(this.ctx, this.aspect, title);
+    await this.ctx.client.setWidgetValue(this.aspect, value, title, geometry);
     this.ctx.invalidate();
   }
 

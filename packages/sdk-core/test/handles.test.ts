@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { VWTestClient } from '../src/client.js';
 import { makeStubBridge } from './_stub.js';
 import type { WidgetNode } from '../src/types.js';
@@ -122,5 +122,77 @@ describe('ListHandle', () => {
     expect(vi.mocked(bridge.postJson)).toHaveBeenCalledWith('/select-row', {
       aspect: 'funds', match: 'Test fund', windowTitle: 'Search',
     });
+  });
+});
+
+describe('action geometry capture (VW_HIGHLIGHT)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const RECT = { x: 10, y: 10, width: 20, height: 20 };
+
+  function highlightBridge(): ReturnType<typeof makeStubBridge> {
+    return makeStubBridge({
+      tree: TREE,
+      jsonResult: () => ({ ok: true, index: 1, rowCount: 2, row: 'r' }),
+      evalResult: (source) =>
+        source.includes('ScheduledControllers')
+          ? { ok: true, result: "'10,10,20,20'" }
+          : { ok: true, result: 'nil' },
+    });
+  }
+
+  function geometryEvals(bridge: ReturnType<typeof makeStubBridge>): unknown[] {
+    return vi
+      .mocked(bridge.postEval)
+      .mock.calls.filter(([source]) => source.includes('ScheduledControllers'));
+  }
+
+  it('records the resolved rectangle on click, fill and doubleClick', async () => {
+    vi.stubEnv('VW_HIGHLIGHT', '1');
+    const bridge = highlightBridge();
+    const vw = new VWTestClient({}, bridge);
+    const scope = vw.window('Win');
+    await scope.field('amt').click();
+    await scope.field('amt').fill('100');
+    await scope.field('amt').doubleClick();
+
+    const events = vw.getActionLog();
+    expect(events.map((event) => event.kind)).toEqual(['click', 'fill', 'click']);
+    for (const event of events) expect(event.detail?.['rect']).toEqual(RECT);
+    expect(geometryEvals(bridge)).toHaveLength(3);
+  });
+
+  it('records the rectangle for table and list interactions', async () => {
+    vi.stubEnv('VW_HIGHLIGHT', '1');
+    const vw = new VWTestClient({}, highlightBridge());
+    await vw.window('Win').table('dates').setCell(1, 'Source Date', '2026-08-10');
+    await vw.window('Win').list('funds').selectByText('r');
+
+    const events = vw.getActionLog();
+    expect(events.map((event) => event.kind)).toEqual(['setDatasetCell', 'selectRow']);
+    for (const event of events) expect(event.detail?.['rect']).toEqual(RECT);
+  });
+
+  it('does not resolve geometry when highlighting is off — no eval round-trip', async () => {
+    delete process.env['VW_HIGHLIGHT'];
+    const bridge = highlightBridge();
+    const vw = new VWTestClient({}, bridge);
+    await vw.window('Win').field('amt').click();
+
+    expect(vw.getActionLog()[0]?.detail?.['rect']).toBeUndefined();
+    expect(geometryEvals(bridge)).toHaveLength(0);
+  });
+
+  it('omits unresolved geometry without failing the interaction', async () => {
+    vi.stubEnv('VW_HIGHLIGHT', '1');
+    const bridge = makeStubBridge({
+      tree: TREE,
+      evalResult: () => ({ ok: true, result: "'NOTFOUND'" }),
+    });
+    const vw = new VWTestClient({}, bridge);
+    await vw.window('Win').field('amt').click();
+    expect(vw.getActionLog()[0]?.detail?.['rect']).toBeUndefined();
   });
 });

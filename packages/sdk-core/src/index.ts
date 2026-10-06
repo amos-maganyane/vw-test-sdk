@@ -59,16 +59,31 @@ export {
   buildWidgetRectSource,
   parseWidgetRect,
   composeHighlightBorder,
+  composeTargetBox,
+  composeClickDot,
+  composeCursorGlyph,
+  composeInteractionOverlay,
   highlightColorForPurpose,
+  isHighlightEnabled,
   findLatestInteraction,
+  findRecordedInteractionAt,
   DEFAULT_HIGHLIGHT_THICKNESS,
 } from './highlight.js';
 export type {
+  ActionGeometry,
+  ComposeClickDotOptions,
+  ComposeCursorGlyphOptions,
+  ComposeInteractionOverlayOptions,
+  ComposeTargetBoxOptions,
   HighlightPurpose,
   HighlightRenderOptions,
+  InteractionOverlay,
   InteractionTarget,
-  WidgetRect,
+  Point,
+  RecordedInteraction,
   RgbColor,
+  RgbaColor,
+  WidgetRect,
 } from './highlight.js';
 
 // Action log
